@@ -25,6 +25,9 @@ VAULT_DIR = ROOT / "vault"
 EXPERIMENTS_DIR = VAULT_DIR / "experiments"
 CONCEPTS_DIR = VAULT_DIR / "concepts"
 PROPOSALS_DIR = VAULT_DIR / "proposals"
+DISTILLED_DIR = VAULT_DIR / "distilled"
+LITERATURE_DIR = VAULT_DIR / "literature"
+REPORTS_DIR = VAULT_DIR / "reports"
 DATA_DIR = ROOT / "data"
 INDEX_DIR = ROOT / "index"
 DB_PATH = INDEX_DIR / "kb.sqlite"
@@ -49,7 +52,17 @@ def now_iso():
 
 
 def ensure_dirs():
-    for path in (VAULT_DIR, EXPERIMENTS_DIR, CONCEPTS_DIR, PROPOSALS_DIR, DATA_DIR, INDEX_DIR):
+    for path in (
+        VAULT_DIR,
+        EXPERIMENTS_DIR,
+        CONCEPTS_DIR,
+        PROPOSALS_DIR,
+        DISTILLED_DIR,
+        LITERATURE_DIR,
+        REPORTS_DIR,
+        DATA_DIR,
+        INDEX_DIR,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -154,6 +167,266 @@ def markdown_table(rows):
         safe_value = str(value).replace("|", "\\|").replace("\n", " ").strip()
         out.append(f"| {key} | {safe_value} |")
     return "\n".join(out) + "\n"
+
+
+def extract_sections(body):
+    matches = list(re.finditer(r"(?m)^(#{1,6})\s+(.+?)\s*$", body))
+    sections = {}
+    for idx, match in enumerate(matches):
+        heading = match.group(2).strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(body)
+        sections[heading] = body[start:end].strip()
+    return sections
+
+
+def section_text(body, *names):
+    sections = extract_sections(body)
+    for name in names:
+        if name in sections and sections[name].strip():
+            return sections[name].strip()
+    lowered = {key.lower(): value for key, value in sections.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def first_paragraph(text):
+    cleaned = [line.strip() for line in text.splitlines()]
+    chunks = []
+    current = []
+    for line in cleaned:
+        if not line:
+            if current:
+                chunks.append(" ".join(current).strip())
+                current = []
+            continue
+        if line.startswith("|") or line.startswith("- ") or line.startswith("* "):
+            continue
+        current.append(line)
+    if current:
+        chunks.append(" ".join(current).strip())
+    return chunks[0] if chunks else ""
+
+
+def bullet_list(text):
+    items = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("- ", "* ", "+ ")):
+            item = stripped[2:].strip()
+            if item:
+                items.append(item)
+    return items
+
+
+def truncate_text(text, limit=180):
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
+def doc_kind(meta, path):
+    type_hint = str(meta.get("type") or "").lower()
+    try:
+        rel_parts = [part.lower() for part in path.relative_to(VAULT_DIR).parts]
+    except ValueError:
+        rel_parts = [part.lower() for part in path.parts]
+    first_part = rel_parts[0] if rel_parts else ""
+    if first_part == "distilled":
+        return "general"
+    if "experiment" in type_hint or first_part == "experiments":
+        return "experiment"
+    if any(token in type_hint for token in ("literature", "paper", "article", "paper-note")) or first_part == "literature":
+        return "literature"
+    if any(token in type_hint for token in ("report", "meeting", "review")) or first_part == "reports":
+        return "report"
+    if "concept" in type_hint or first_part == "concepts":
+        return "concept"
+    return "general"
+
+
+def distill_source_path(source_doc, kind):
+    source_id = source_doc["id"]
+    if kind == "experiment":
+        return DISTILLED_DIR / "experiments" / f"{slugify(source_id, 'experiment')}.md"
+    if kind == "literature":
+        return DISTILLED_DIR / "literature" / f"{slugify(source_id, 'literature')}.md"
+    if kind == "report":
+        return DISTILLED_DIR / "reports" / f"{slugify(source_id, 'report')}.md"
+    return DISTILLED_DIR / "general" / f"{slugify(source_id, 'document')}.md"
+
+
+def extract_experiment_atoms(meta, body):
+    return {
+        "summary": section_text(body, "摘要") or str(meta.get("summary") or "").strip(),
+        "conditions": section_text(body, "实验条件"),
+        "observations": section_text(body, "关键观察"),
+        "conclusion": section_text(body, "结论") or str(meta.get("conclusion") or "").strip(),
+        "raw_tags": tags_from_value(meta.get("tags")),
+    }
+
+
+def extract_literature_atoms(meta, body):
+    sections = extract_sections(body)
+    abstract = section_text(body, "摘要", "Abstract", "概述") or str(meta.get("summary") or "").strip()
+    return {
+        "problem": section_text(body, "研究问题", "问题", "目的", "Objective"),
+        "method": section_text(body, "方法", "Method", "Approach"),
+        "findings": section_text(body, "结果", "结论", "Findings", "Results"),
+        "limitations": section_text(body, "局限", "局限性", "Limitations"),
+        "abstract": abstract or first_paragraph(body),
+        "keywords": tags_from_value(meta.get("tags")) or bullet_list(sections.get("关键词", "")),
+    }
+
+
+def extract_report_atoms(meta, body):
+    actions = section_text(body, "行动项", "Action Items", "待办")
+    decisions = section_text(body, "决定事项", "关键决定", "结论", "Decisions")
+    risks = section_text(body, "风险", "阻塞项", "Issues", "Blockers")
+    return {
+        "topic": section_text(body, "主题", "会议主题", "项目背景") or str(meta.get("title") or "").strip(),
+        "decisions": decisions,
+        "actions": actions,
+        "risks": risks,
+        "owner": str(meta.get("owner") or "").strip(),
+        "deadline": str(meta.get("deadline") or "").strip(),
+    }
+
+
+def experiment_distillation_body(meta, path, source_path, atoms):
+    title = str(meta.get("title") or path.stem)
+    conclusion = atoms["conclusion"] or "待补充。"
+    summary = atoms["summary"] or "待补充。"
+    conditions = atoms["conditions"] or "未抽取到结构化实验条件。"
+    observations = atoms["observations"] or "待补充。"
+    reusable_rule = conclusion if conclusion != "待补充。" else summary
+    next_step = "复现推荐条件并补充对照组。"
+    caveat = "注意区分单次结果和稳定规律，正式结论需结合更多批次验证。"
+    return (
+        f"# 蒸馏卡：{title}\n\n"
+        "## 一句话结论\n\n"
+        f"{truncate_text(conclusion or summary or '待补充。', 220)}\n\n"
+        "## 可复用规则\n\n"
+        f"{truncate_text(reusable_rule, 260)}\n\n"
+        "## 关键条件\n\n"
+        f"{conditions}\n\n"
+        "## 证据摘要\n\n"
+        f"{observations}\n\n"
+        "## 边界与风险\n\n"
+        f"{caveat}\n\n"
+        "## 下一步建议\n\n"
+        f"{next_step}\n\n"
+        "## 来源\n\n"
+        f"- {source_path}\n"
+    )
+
+
+def literature_distillation_body(meta, path, source_path, atoms):
+    title = str(meta.get("title") or path.stem)
+    abstract = atoms["abstract"] or "待补充。"
+    problem = atoms["problem"] or "未明确指出研究问题。"
+    method = atoms["method"] or "未明确指出方法。"
+    findings = atoms["findings"] or "未明确给出结论。"
+    limitations = atoms["limitations"] or "未明确给出局限。"
+    keywords = ", ".join(atoms["keywords"]) if atoms["keywords"] else "待补充"
+    applicable = "把研究方法或核心机制映射到我们当前的实验条件，再判断是否需要本地复现。"
+    evidence = "先按证据来源和样本规模判断可迁移性，再决定是否直接采用。"
+    return (
+        f"# 文献蒸馏：{title}\n\n"
+        "## 研究问题\n\n"
+        f"{problem}\n\n"
+        "## 核心方法\n\n"
+        f"{method}\n\n"
+        "## 核心发现\n\n"
+        f"{findings}\n\n"
+        "## 证据摘要\n\n"
+        f"{abstract}\n\n"
+        "## 证据强度判断\n\n"
+        f"{evidence}\n\n"
+        "## 局限与前提\n\n"
+        f"{limitations}\n\n"
+        "## 对我们可用的点\n\n"
+        f"{applicable}\n\n"
+        "## 关键词\n\n"
+        f"{keywords}\n\n"
+        "## 来源\n\n"
+        f"- {source_path}\n"
+    )
+
+
+def report_distillation_body(meta, path, source_path, atoms):
+    title = str(meta.get("title") or path.stem)
+    topic = atoms["topic"] or "待补充。"
+    decisions = atoms["decisions"] or "未抽取到明确决定事项。"
+    actions = atoms["actions"] or "未抽取到行动项。"
+    risks = atoms["risks"] or "未抽取到阻塞项或风险。"
+    owner = atoms["owner"] or "待补充"
+    deadline = atoms["deadline"] or "待补充"
+    return (
+        f"# 小组汇报蒸馏：{title}\n\n"
+        "## 汇报主题\n\n"
+        f"{topic}\n\n"
+        "## 关键决定\n\n"
+        f"{decisions}\n\n"
+        "## 行动项\n\n"
+        f"{actions}\n\n"
+        "## 风险与阻塞\n\n"
+        f"{risks}\n\n"
+        "## 负责人与截止时间\n\n"
+        f"- 负责人: {owner}\n"
+        f"- 截止时间: {deadline}\n\n"
+        "## 会议结论\n\n"
+        "把决策、行动项和风险压缩成三件事: 现在要做什么, 谁来做, 什么时候复盘。\n\n"
+        "## 来源\n\n"
+        f"- {source_path}\n"
+    )
+
+
+def general_distillation_body(meta, path, source_path, body):
+    title = str(meta.get("title") or path.stem)
+    lead = first_paragraph(body) or "待补充。"
+    return (
+        f"# 蒸馏卡：{title}\n\n"
+        "## 一句话结论\n\n"
+        f"{truncate_text(lead, 220)}\n\n"
+        "## 可复用规则\n\n"
+        "待人工补充。\n\n"
+        "## 风险与边界\n\n"
+        "待人工补充。\n\n"
+        "## 来源\n\n"
+        f"- {source_path}\n"
+    )
+
+
+def generate_distillation(meta, body, path, source_path):
+    kind = doc_kind(meta, path)
+    if kind == "experiment":
+        return experiment_distillation_body(meta, path, source_path, extract_experiment_atoms(meta, body)), kind
+    if kind == "literature":
+        return literature_distillation_body(meta, path, source_path, extract_literature_atoms(meta, body)), kind
+    if kind == "report":
+        return report_distillation_body(meta, path, source_path, extract_report_atoms(meta, body)), kind
+    return general_distillation_body(meta, path, source_path, body), kind
+
+
+def distill_target_meta(source_doc, source_sha, kind):
+    source_path = source_doc["path"]
+    source_id = source_doc["id"]
+    return {
+        "id": f"DIST-{source_id}",
+        "type": f"distilled-{kind}",
+        "title": f"蒸馏卡：{source_doc['title']}",
+        "status": "draft",
+        "source_document_id": source_id,
+        "source_path": source_path,
+        "source_sha256": source_sha,
+        "template_kind": kind,
+        "updated_at": now_iso(),
+    }
 
 
 def row_identity(row):
@@ -281,6 +554,7 @@ def init_project(args):
         init_db(con)
     if not SAMPLE_CSV.exists():
         create_sample_data()
+    create_sample_source_docs()
     env_example = ROOT / "local_ai.env.example"
     if not env_example.exists():
         write_text(
@@ -330,6 +604,96 @@ def create_sample_data():
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def create_sample_source_docs():
+    literature_path = LITERATURE_DIR / "LIT-2026-0001-催化剂筛选方法综述.md"
+    if not literature_path.exists():
+        write_text(
+            literature_path,
+            """---
+id: LIT-2026-0001
+type: literature
+title: 催化剂筛选方法综述
+source_system: internal-reading
+source_id: DOI-10.1000/example
+status: imported
+tags: [催化剂, 文献, 筛选]
+updated_at: 2026-04-14
+---
+
+# 催化剂筛选方法综述
+
+## 摘要
+
+本文总结了催化剂筛选中常见的条件设计方法，强调单因素筛选、对照组设置和重复实验的重要性。
+
+## 研究问题
+
+如何在有限实验次数下尽快找到可放大的催化条件。
+
+## 方法
+
+通过文献对比和案例归纳，总结温度、溶剂、浓度、时间和含水量对结果的影响。
+
+## 结果
+
+低水分环境通常更稳定，温度过高会增加副产物，需要通过对照组验证。
+
+## 局限
+
+该综述偏重经验总结，缺少统一统计标准，部分结论依赖具体底物。
+
+## 关键词
+
+催化剂, 条件筛选, 对照组, 放大, 副产物
+""",
+        )
+
+    report_path = REPORTS_DIR / "REP-2026-0001-催化剂筛选周报.md"
+    if not report_path.exists():
+        write_text(
+            report_path,
+            """---
+id: REP-2026-0001
+type: report
+title: 催化剂筛选周报
+source_system: team-meeting
+source_id: WEEKLY-2026-16
+owner: 研发小组A
+deadline: 2026-04-18
+status: imported
+tags: [周报, 催化剂, 行动项]
+updated_at: 2026-04-14
+---
+
+# 催化剂筛选周报
+
+## 会议主题
+
+本周重点讨论催化剂 A 和 B 的对照结果，以及下周的验证计划。
+
+## 关键决定
+
+- 继续以催化剂 A 作为主线方案。
+- 对催化剂 B 仅保留低成本备选路线。
+
+## 行动项
+
+- 复现催化剂 A 的 80 摄氏度条件。
+- 补充底物更换后的对照组。
+- 整理 LIMS 数据和原始记录。
+
+## 风险
+
+- 数据批次较少，稳定性还需验证。
+- 低水分控制需要流程固化。
+
+## 需要支持
+
+需要实验平台协助加快重复批次安排。
+""",
+        )
 
 
 def cmd_ingest(args):
@@ -640,6 +1004,109 @@ def cmd_ask(args):
     print(answer)
 
 
+def distillation_prompt(kind, title, meta, body, source_path):
+    if kind == "experiment":
+        instruction = (
+            "请把实验内容蒸馏成可复用知识卡，必须输出以下小节：\n"
+            "1. 一句话结论\n2. 可复用规则\n3. 关键条件\n4. 证据摘要\n5. 边界与风险\n6. 下一步建议\n7. 来源\n"
+            "要求只基于原文，不要编造。"
+        )
+    elif kind == "literature":
+        instruction = (
+            "请把文献内容蒸馏成可用于内部检索的知识卡，必须输出以下小节：\n"
+            "1. 研究问题\n2. 核心方法\n3. 核心发现\n4. 证据摘要\n5. 证据强度判断\n6. 局限与前提\n7. 对我们可用的点\n8. 关键词\n9. 来源\n"
+            "要求只基于原文，不要编造。"
+        )
+    elif kind == "report":
+        instruction = (
+            "请把小组汇报蒸馏成行动卡，必须输出以下小节：\n"
+            "1. 汇报主题\n2. 关键决定\n3. 行动项\n4. 风险与阻塞\n5. 负责人与截止时间\n6. 会议结论\n7. 来源\n"
+            "要求只基于原文，不要编造。"
+        )
+    else:
+        instruction = (
+            "请把文档蒸馏成简洁知识卡，必须输出以下小节：\n"
+            "1. 一句话结论\n2. 可复用规则\n3. 风险与边界\n4. 来源\n"
+            "要求只基于原文，不要编造。"
+        )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是离线知识蒸馏助手。你的任务是把原始材料压缩成可检索、可复用、可审计的 Markdown 知识卡。"
+                "不要假装你读过原始材料之外的信息。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"文档类型: {kind}\n"
+                f"标题: {title}\n"
+                f"路径: {source_path}\n"
+                f"元数据: {json.dumps(meta, ensure_ascii=False)}\n\n"
+                f"原文:\n{body[:7000]}\n\n"
+                f"{instruction}"
+            ),
+        },
+    ]
+
+
+def ai_distillation(kind, title, meta, body, source_path):
+    answer, error = chat_completion(distillation_prompt(kind, title, meta, body, source_path), temperature=0.2)
+    if answer:
+        return answer, None
+    return None, error
+
+
+def save_distillation(source_doc, kind, body):
+    target = distill_source_path(source_doc, kind)
+    meta = distill_target_meta(source_doc, source_doc["sha256"], kind)
+    write_text(target, emit_frontmatter(meta) + body)
+    return target
+
+
+def cmd_distill(args):
+    ensure_dirs()
+    created = 0
+    updated = 0
+    with connect_db() as con:
+        init_db(con)
+        for path in list_markdown_documents():
+            if path.is_relative_to(PROPOSALS_DIR) or path.is_relative_to(DISTILLED_DIR):
+                continue
+            content = read_text(path)
+            meta, body = parse_markdown(content)
+            rel_path = str(path.relative_to(ROOT))
+            doc_id = str(meta.get("id") or stable_id("DOC", rel_path))
+            title = extract_title(meta, body, path)
+            source_doc = {
+                "id": doc_id,
+                "path": rel_path,
+                "title": title,
+                "sha256": sha256_bytes(content.encode("utf-8")),
+            }
+            kind = doc_kind(meta, path)
+            if kind not in {"experiment", "literature", "report"}:
+                continue
+            target = distill_source_path(source_doc, kind)
+            distilled_body = None
+            ai_body, ai_error = ai_distillation(kind, title, meta, body, rel_path)
+            if ai_body:
+                distilled_body = ai_body
+            else:
+                distilled_body, _ = generate_distillation(meta, body, path, rel_path)
+            if target.exists():
+                old_meta, _ = parse_markdown(read_text(target))
+                if old_meta.get("source_sha256") == source_doc["sha256"]:
+                    continue
+                updated += 1
+            else:
+                created += 1
+            save_distillation(source_doc, kind, distilled_body)
+        con.commit()
+    print(f"Created {created} distilled note(s); updated {updated} distilled note(s).")
+
+
 def heuristic_proposal(meta, body, title, path):
     tags = tags_from_value(meta.get("tags"))
     missing = []
@@ -693,6 +1160,8 @@ def cmd_propose(args):
     with connect_db() as con:
         init_db(con)
         for path in list_markdown_documents():
+            if path.is_relative_to(DISTILLED_DIR):
+                continue
             content = read_text(path)
             source_sha = sha256_bytes(content.encode("utf-8"))
             meta, body = parse_markdown(content)
@@ -734,6 +1203,8 @@ def cmd_demo(args):
     init_project(args)
     cmd_ingest(argparse.Namespace(source=str(SAMPLE_CSV)))
     index_documents(args)
+    cmd_distill(args)
+    index_documents(args)
     print("\nDemo search: 催化剂")
     print_results("催化剂", search_chunks("催化剂", 5))
 
@@ -766,6 +1237,9 @@ def build_parser():
 
     propose_cmd = sub.add_parser("propose", help="Generate review-only proposal Markdown files.")
     propose_cmd.set_defaults(func=cmd_propose)
+
+    distill_cmd = sub.add_parser("distill", help="Generate distilled knowledge cards from source Markdown.")
+    distill_cmd.set_defaults(func=cmd_distill)
 
     demo_cmd = sub.add_parser("demo", help="Create sample data, index it, and run a search.")
     demo_cmd.set_defaults(func=cmd_demo)
