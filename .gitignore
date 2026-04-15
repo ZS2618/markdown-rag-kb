@@ -2,4 +2,9 @@ __pycache__/
 *.pyc
 index/*.sqlite
 index/*.sqlite-*
-vault/distilled/
+raw/experiments/*
+raw/literature/*
+raw/reports/*
+!raw/experiments/.gitkeep
+!raw/literature/.gitkeep
+!raw/reports/.gitkeep

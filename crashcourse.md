@@ -1,6 +1,6 @@
 # Crash Course
 
-这是一份上手指南。目标很简单: 你在办公室克隆这个项目后, 按顺序执行下面的命令, 就能把知识库跑起来、导入数据、搜索、问答, 以及生成待审核草稿。
+这是一份上手指南。目标很简单: 你在办公室克隆这个项目后, 按顺序执行下面的命令, 就能把 raw 原始材料、蒸馏结构化知识库、搜索问答和待审核草稿跑起来。
 
 ## 先跑起来
 
@@ -12,10 +12,11 @@ python kb.py demo
 
 这条命令会自动做四件事:
 
-1. 创建 `vault/`、`data/`、`index/` 这些目录
-2. 导入样例实验数据
-3. 重建 SQLite FTS5 索引
-4. 做一次“催化剂”搜索, 让你看到结果长什么样
+1. 创建 `raw/`、`vault/`、`data/`、`index/` 这些目录
+2. 导入样例实验摘录, 并准备文献和汇报摘录
+3. 蒸馏出结构化 Markdown 知识卡
+4. 重建 SQLite FTS5 索引
+5. 做一次“催化剂”搜索, 让你看到结果长什么样
 
 如果这一步成功, 说明你的环境已经可以用了。
 
@@ -24,14 +25,20 @@ python kb.py demo
 跑完后, 项目里会多出这些东西:
 
 ```text
-vault/experiments/    实验 Markdown
-vault/concepts/       概念类 Markdown
+raw/experiments/      Excel、PPT、原始导出等实验材料
+raw/literature/       PDF 文献
+raw/reports/          PDF、PPT 等小组汇报
+raw/extracts/         从原始文件摘出的文本
+vault/experiments/    蒸馏后的实验知识卡
+vault/literature/     蒸馏后的文献知识卡
+vault/reports/        蒸馏后的小组汇报知识卡
+vault/concepts/       概念类结构化知识
 vault/proposals/      待人工审核的草稿
 data/                 样例输入
 index/kb.sqlite       派生索引, 可以删除后重建
 ```
 
-你真正维护的是 `vault/` 里的 Markdown。`index/kb.sqlite` 只是缓存, 不要把它当事实源。
+原始文件不要直接进知识库。`vault/` 只放蒸馏并结构化后的 Markdown。`index/kb.sqlite` 只是缓存, 不要把它当事实源。
 
 ## 最常用的命令
 
@@ -66,7 +73,7 @@ python kb.py distill
 : 生成 `vault/proposals/` 里的待审核草稿, 不会自动改正式知识库。
 
 `distill`
-: 把实验、文献和小组汇报压缩成可检索的知识卡, 放到 `vault/distilled/`。
+: 读取 `raw/extracts/`, 把实验、文献和小组汇报压缩成可检索的知识卡, 放到 `vault/`。
 
 ## 导入数据
 
@@ -79,28 +86,41 @@ id,title,summary,result,conclusion,date,source_id,source_system,tags
 EXP-2026-0001,催化剂 A 条件筛选,对催化剂 A 在不同温度下进行筛选,80 摄氏度条件下转化率达到 91%,催化剂 A 的推荐初始条件为 80 摄氏度,2026-04-14,LIMS-12345,LIMS,"催化剂, 条件筛选"
 ```
 
-导入后, 每一行会生成一篇 Markdown, 放在 `vault/experiments/`。
+导入后, 每一行会生成一篇摘录 Markdown, 放在 `raw/extracts/experiments/`。这还不是正式知识库内容。
 
 如果你有自己的导出文件, 直接替换成:
 
 ```powershell
 python kb.py ingest path\to\your_file.csv
+python kb.py distill
 python kb.py index
 ```
 
-## Markdown 怎么写
+## Raw 和 Vault 怎么分工
 
-每篇正式文档都建议有 frontmatter 和固定章节。最小格式像这样:
+原始文件放在 `raw/`, 比如:
+
+```text
+raw/experiments/    Excel、PPT、仪器导出
+raw/literature/     PDF 文献
+raw/reports/        PDF、PPT、会议材料
+```
+
+因为第一版零第三方依赖, 不直接解析 PDF、PPT、Excel。你可以先用公司允许的工具或本地 AI 把原始文件摘成文本, 放到 `raw/extracts/`。
+
+摘录文件的最小格式像这样:
 
 ```markdown
 ---
 id: EXP-2026-0001
-type: experiment
+type: raw-extract
+raw_kind: experiment
 title: 催化剂 A 条件筛选
 source_system: LIMS
 source_id: LIMS-12345
-status: imported
+status: extracted
 tags: [催化剂, 条件筛选]
+raw_file_path: raw/experiments/EXP-2026-0001.xlsx
 updated_at: 2026-04-14
 ---
 
@@ -115,7 +135,7 @@ updated_at: 2026-04-14
 ## 结论
 ```
 
-你不用一开始就写得很完整, 但最好保留这几个章节名, 这样后面检索和 proposal 都更稳定。
+`python kb.py distill` 会把这些摘录压缩成 `vault/` 里的结构化知识卡。只有这些卡片会进入检索库。
 
 ## 搜索和问答
 
@@ -166,19 +186,28 @@ python kb.py ask "催化剂 A 的推荐条件是什么"
 2. 文献卡: 研究问题、核心方法、核心发现、证据摘要、证据强度判断、局限与前提、对我们可用的点、关键词
 3. 汇报卡: 汇报主题、关键决定、行动项、风险与阻塞、负责人与截止时间、会议结论
 
-如果有本地 AI, `distill` 会尽量把这些模板填满；没有 AI 时, 它会用规则和章节提取生成可读版本。
+如果有本地 AI, `distill` 会尽量把这些模板填满；没有 AI 时, 它会用规则和章节提取生成可读版本。无论哪种方式, raw 原始材料都不会直接进入 `vault/`。
+
+如果你先用无 AI 模式生成过一版, 后来接好了本地 AI, 可以运行:
+
+```powershell
+python kb.py distill --force
+python kb.py index
+```
 
 ## 一个推荐工作流
 
 如果你今天要真正开始用它, 我建议按这个顺序:
 
 1. `python kb.py init`
-2. 把你的实验导出成 CSV 或 JSON
-3. `python kb.py ingest 你的文件.csv`
-4. `python kb.py index`
-5. `python kb.py search "你关心的关键词"`
-6. `python kb.py ask "完整问题"`
-7. `python kb.py propose`
+2. 把原始 PDF、PPT、Excel 放进 `raw/` 对应目录
+3. 把原始材料摘录成 `raw/extracts/**/*.extract.md`
+4. 如果是 CSV 或 JSON 实验导出, 可以用 `python kb.py ingest 你的文件.csv` 自动生成实验摘录
+5. `python kb.py distill`
+6. `python kb.py index`
+7. `python kb.py search "你关心的关键词"`
+8. `python kb.py ask "完整问题"`
+9. `python kb.py propose`
 
 ## 常见坑
 
@@ -189,11 +218,11 @@ python kb.py ask "催化剂 A 的推荐条件是什么"
 : 说明没有配置 `LOCAL_OPENAI_BASE_URL`, 或者本地 AI 接口不可达。
 
 导入后看不到新内容
-: 大概率是你还没重新执行 `python kb.py index`。
+: 大概率是你还没执行 `python kb.py distill` 和 `python kb.py index`。
 
 Windows 路径问题
 : 尽量在项目根目录里执行命令, 并优先使用相对路径。
 
 ## 你真正要记住的一句话
 
-Markdown 是事实源, SQLite 是索引, AI 只负责辅助和提案, 不负责偷偷改正式知识库。
+raw 是原始证据, vault 是结构化知识库, SQLite 是索引, AI 只负责辅助蒸馏和提案。

@@ -25,9 +25,13 @@ VAULT_DIR = ROOT / "vault"
 EXPERIMENTS_DIR = VAULT_DIR / "experiments"
 CONCEPTS_DIR = VAULT_DIR / "concepts"
 PROPOSALS_DIR = VAULT_DIR / "proposals"
-DISTILLED_DIR = VAULT_DIR / "distilled"
 LITERATURE_DIR = VAULT_DIR / "literature"
 REPORTS_DIR = VAULT_DIR / "reports"
+RAW_DIR = ROOT / "raw"
+RAW_EXPERIMENTS_DIR = RAW_DIR / "experiments"
+RAW_LITERATURE_DIR = RAW_DIR / "literature"
+RAW_REPORTS_DIR = RAW_DIR / "reports"
+RAW_EXTRACTS_DIR = RAW_DIR / "extracts"
 DATA_DIR = ROOT / "data"
 INDEX_DIR = ROOT / "index"
 DB_PATH = INDEX_DIR / "kb.sqlite"
@@ -57,9 +61,14 @@ def ensure_dirs():
         EXPERIMENTS_DIR,
         CONCEPTS_DIR,
         PROPOSALS_DIR,
-        DISTILLED_DIR,
         LITERATURE_DIR,
         REPORTS_DIR,
+        RAW_EXPERIMENTS_DIR,
+        RAW_LITERATURE_DIR,
+        RAW_REPORTS_DIR,
+        RAW_EXTRACTS_DIR / "experiments",
+        RAW_EXTRACTS_DIR / "literature",
+        RAW_EXTRACTS_DIR / "reports",
         DATA_DIR,
         INDEX_DIR,
     ):
@@ -231,13 +240,17 @@ def truncate_text(text, limit=180):
 
 def doc_kind(meta, path):
     type_hint = str(meta.get("type") or "").lower()
+    raw_kind = str(meta.get("raw_kind") or "").lower()
+    if raw_kind in {"experiment", "literature", "report"}:
+        return raw_kind
     try:
-        rel_parts = [part.lower() for part in path.relative_to(VAULT_DIR).parts]
+        rel_parts = [part.lower() for part in path.relative_to(RAW_EXTRACTS_DIR).parts]
     except ValueError:
-        rel_parts = [part.lower() for part in path.parts]
+        try:
+            rel_parts = [part.lower() for part in path.relative_to(VAULT_DIR).parts]
+        except ValueError:
+            rel_parts = [part.lower() for part in path.parts]
     first_part = rel_parts[0] if rel_parts else ""
-    if first_part == "distilled":
-        return "general"
     if "experiment" in type_hint or first_part == "experiments":
         return "experiment"
     if any(token in type_hint for token in ("literature", "paper", "article", "paper-note")) or first_part == "literature":
@@ -252,12 +265,12 @@ def doc_kind(meta, path):
 def distill_source_path(source_doc, kind):
     source_id = source_doc["id"]
     if kind == "experiment":
-        return DISTILLED_DIR / "experiments" / f"{slugify(source_id, 'experiment')}.md"
+        return EXPERIMENTS_DIR / f"{slugify(source_id, 'experiment')}.md"
     if kind == "literature":
-        return DISTILLED_DIR / "literature" / f"{slugify(source_id, 'literature')}.md"
+        return LITERATURE_DIR / f"{slugify(source_id, 'literature')}.md"
     if kind == "report":
-        return DISTILLED_DIR / "reports" / f"{slugify(source_id, 'report')}.md"
-    return DISTILLED_DIR / "general" / f"{slugify(source_id, 'document')}.md"
+        return REPORTS_DIR / f"{slugify(source_id, 'report')}.md"
+    return CONCEPTS_DIR / f"{slugify(source_id, 'document')}.md"
 
 
 def extract_experiment_atoms(meta, body):
@@ -418,9 +431,9 @@ def distill_target_meta(source_doc, source_sha, kind):
     source_id = source_doc["id"]
     return {
         "id": f"DIST-{source_id}",
-        "type": f"distilled-{kind}",
+        "type": kind,
         "title": f"蒸馏卡：{source_doc['title']}",
-        "status": "draft",
+        "status": "structured-draft",
         "source_document_id": source_id,
         "source_path": source_path,
         "source_sha256": source_sha,
@@ -448,11 +461,12 @@ def experiment_markdown(row, source_path, source_sha):
     tags = tags_from_value(row.get("tags"))
     meta = {
         "id": experiment_id,
-        "type": "experiment",
+        "type": "raw-extract",
+        "raw_kind": "experiment",
         "title": title,
         "source_system": row.get("source_system") or "file-import",
         "source_id": row.get("source_id") or experiment_id,
-        "status": row.get("status") or "imported",
+        "status": row.get("status") or "extracted",
         "tags": tags,
         "acl": "",
         "raw_data_path": str(source_path),
@@ -607,18 +621,20 @@ def create_sample_data():
 
 
 def create_sample_source_docs():
-    literature_path = LITERATURE_DIR / "LIT-2026-0001-催化剂筛选方法综述.md"
+    literature_path = RAW_EXTRACTS_DIR / "literature" / "LIT-2026-0001-催化剂筛选方法综述.extract.md"
     if not literature_path.exists():
         write_text(
             literature_path,
             """---
 id: LIT-2026-0001
-type: literature
+type: raw-extract
+raw_kind: literature
 title: 催化剂筛选方法综述
 source_system: internal-reading
 source_id: DOI-10.1000/example
-status: imported
+status: extracted
 tags: [催化剂, 文献, 筛选]
+raw_file_path: raw/literature/LIT-2026-0001.pdf
 updated_at: 2026-04-14
 ---
 
@@ -650,20 +666,22 @@ updated_at: 2026-04-14
 """,
         )
 
-    report_path = REPORTS_DIR / "REP-2026-0001-催化剂筛选周报.md"
+    report_path = RAW_EXTRACTS_DIR / "reports" / "REP-2026-0001-催化剂筛选周报.extract.md"
     if not report_path.exists():
         write_text(
             report_path,
             """---
 id: REP-2026-0001
-type: report
+type: raw-extract
+raw_kind: report
 title: 催化剂筛选周报
 source_system: team-meeting
 source_id: WEEKLY-2026-16
 owner: 研发小组A
 deadline: 2026-04-18
-status: imported
+status: extracted
 tags: [周报, 催化剂, 行动项]
+raw_file_path: raw/reports/REP-2026-0001.pptx
 updated_at: 2026-04-14
 ---
 
@@ -710,11 +728,11 @@ def cmd_ingest(args):
         row = normalize_row(raw_row)
         experiment_id = row_identity(row)
         title = row.get("title") or experiment_id
-        filename = f"{slugify(experiment_id, 'experiment')}-{slugify(title, 'untitled')}.md"
-        target = EXPERIMENTS_DIR / filename
+        filename = f"{slugify(experiment_id, 'experiment')}-{slugify(title, 'untitled')}.extract.md"
+        target = RAW_EXTRACTS_DIR / "experiments" / filename
         write_text(target, experiment_markdown(row, source_path, source_sha))
         count += 1
-    print(f"Imported {count} experiment record(s) from {source_path}")
+    print(f"Imported {count} experiment extract(s) from {source_path}")
 
 
 def list_markdown_documents():
@@ -728,6 +746,12 @@ def list_markdown_documents():
         except ValueError:
             docs.append(path)
     return docs
+
+
+def list_raw_extract_documents():
+    if not RAW_EXTRACTS_DIR.exists():
+        return []
+    return sorted(RAW_EXTRACTS_DIR.rglob("*.extract.md"))
 
 
 def chunk_text(body, max_chars=1200):
@@ -1071,9 +1095,7 @@ def cmd_distill(args):
     updated = 0
     with connect_db() as con:
         init_db(con)
-        for path in list_markdown_documents():
-            if path.is_relative_to(PROPOSALS_DIR) or path.is_relative_to(DISTILLED_DIR):
-                continue
+        for path in list_raw_extract_documents():
             content = read_text(path)
             meta, body = parse_markdown(content)
             rel_path = str(path.relative_to(ROOT))
@@ -1097,7 +1119,7 @@ def cmd_distill(args):
                 distilled_body, _ = generate_distillation(meta, body, path, rel_path)
             if target.exists():
                 old_meta, _ = parse_markdown(read_text(target))
-                if old_meta.get("source_sha256") == source_doc["sha256"]:
+                if old_meta.get("source_sha256") == source_doc["sha256"] and not getattr(args, "force", False):
                     continue
                 updated += 1
             else:
@@ -1160,8 +1182,6 @@ def cmd_propose(args):
     with connect_db() as con:
         init_db(con)
         for path in list_markdown_documents():
-            if path.is_relative_to(DISTILLED_DIR):
-                continue
             content = read_text(path)
             source_sha = sha256_bytes(content.encode("utf-8"))
             meta, body = parse_markdown(content)
@@ -1202,7 +1222,6 @@ def cmd_propose(args):
 def cmd_demo(args):
     init_project(args)
     cmd_ingest(argparse.Namespace(source=str(SAMPLE_CSV)))
-    index_documents(args)
     cmd_distill(args)
     index_documents(args)
     print("\nDemo search: 催化剂")
@@ -1218,7 +1237,7 @@ def build_parser():
     init_cmd = sub.add_parser("init", help="Create folders, sample config, and empty SQLite index.")
     init_cmd.set_defaults(func=init_project)
 
-    ingest_cmd = sub.add_parser("ingest", help="Import CSV/JSON experiment data into Markdown.")
+    ingest_cmd = sub.add_parser("ingest", help="Import CSV/JSON experiment data into raw extract Markdown.")
     ingest_cmd.add_argument("source", help="Path to a CSV or JSON file.")
     ingest_cmd.set_defaults(func=cmd_ingest)
 
@@ -1238,7 +1257,8 @@ def build_parser():
     propose_cmd = sub.add_parser("propose", help="Generate review-only proposal Markdown files.")
     propose_cmd.set_defaults(func=cmd_propose)
 
-    distill_cmd = sub.add_parser("distill", help="Generate distilled knowledge cards from source Markdown.")
+    distill_cmd = sub.add_parser("distill", help="Generate distilled knowledge cards from raw extract Markdown.")
+    distill_cmd.add_argument("--force", action="store_true", help="Regenerate cards even when source extracts are unchanged.")
     distill_cmd.set_defaults(func=cmd_distill)
 
     demo_cmd = sub.add_parser("demo", help="Create sample data, index it, and run a search.")

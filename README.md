@@ -1,6 +1,6 @@
 # 离线 Markdown 知识库 + 本地 RAG MVP
 
-这是一个 Windows 优先、零第三方 Python 依赖的离线知识库原型。Markdown 是事实源，SQLite FTS5 是可重建索引，本地 AI 只作为可选增强。
+这是一个 Windows 优先、零第三方 Python 依赖的离线知识库原型。原始文件放在 `raw/`，只有经过蒸馏并结构化的 Markdown 才进入 `vault/`，SQLite FTS5 是可重建索引，本地 AI 只作为可选增强。
 
 ## 快速开始
 
@@ -10,7 +10,7 @@
 python kb.py demo
 ```
 
-这会创建 `vault/`、`data/`、`index/` 目录，导入样例实验数据，重建索引，并执行一次“催化剂”检索。
+这会创建 `raw/`、`vault/`、`data/`、`index/` 目录，导入样例实验摘录，蒸馏成结构化知识卡，重建索引，并执行一次“催化剂”检索。
 
 ## 常用命令
 
@@ -25,7 +25,8 @@ python kb.py distill
 ```
 
 `ask` 会先做本地检索，再尝试调用公司内网 OpenAI 兼容接口。如果没有配置 AI，它会自动降级为检索结果，不会联网。
-`distill` 会把实验、文献和小组汇报压缩成可检索的知识卡，放到 `vault/distilled/`。
+`distill` 会读取 `raw/extracts/` 里的文本摘录，把实验、文献和小组汇报压缩成可检索的结构化知识卡，并写入 `vault/`。
+如果你后来接入了本地 AI, 可以用 `python kb.py distill --force` 重新生成已有知识卡。
 
 ## 本地 AI 配置
 
@@ -42,13 +43,13 @@ python kb.py ask "催化剂实验结论是什么"
 
 ## 数据导入
 
-第一版支持 CSV 和 JSON。CSV 每一行会生成一篇 `vault/experiments/*.md`。系统优先识别这些字段：
+第一版支持 CSV 和 JSON。CSV 每一行会先生成一篇 `raw/extracts/experiments/*.extract.md`，它还不是正式知识库内容。系统优先识别这些字段：
 
 ```text
 id, title, summary, result, conclusion, date, source_id, source_system, tags, status
 ```
 
-其他字段会写入 Markdown 的“原始字段”表格。导入文件路径和 SHA256 会写入 frontmatter，方便审计。
+其他字段会写入摘录 Markdown 的“原始字段”表格。导入文件路径和 SHA256 会写入 frontmatter，方便审计。
 
 JSON 支持对象数组：
 
@@ -68,10 +69,21 @@ JSON 支持对象数组：
 
 ## 知识库约定
 
-正式知识放在：
+原始文件放在：
+
+```text
+raw/experiments/    Excel、PPT、原始导出等实验材料
+raw/literature/     PDF 文献
+raw/reports/        PDF、PPT 等小组汇报
+raw/extracts/       从原始文件摘出的文本, 用于蒸馏
+```
+
+正式知识库只放结构化 Markdown：
 
 ```text
 vault/experiments/
+vault/literature/
+vault/reports/
 vault/concepts/
 ```
 
@@ -91,7 +103,7 @@ vault/proposals/
 - 文献: 研究问题、核心方法、核心发现、证据摘要、证据强度判断、局限与前提、对我们可用的点、关键词
 - 小组汇报: 汇报主题、关键决定、行动项、风险与阻塞、负责人与截止时间、会议结论
 
-蒸馏卡保留来源路径, 便于追溯原文。
+蒸馏卡保留 raw 来源路径和摘录哈希, 便于追溯原文。
 
 ## 设计边界
 
