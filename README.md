@@ -148,6 +148,8 @@ vault/proposals/
 
 蒸馏卡保留 raw 来源路径和摘录哈希, 便于追溯原文。
 
+所有回退路径都会输出 `warning:`。例如 PDF/旧 Office 弱抽取、未知文件类型、CSV 缺字段补 `待补充`、缺 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索、未配置本地 AI 时使用规则蒸馏或规则 proposal，都会在命令行明确提示。
+
 ## 设计边界
 
 - 不使用第三方 Python 包，不依赖 pip、make、bash 或外网。

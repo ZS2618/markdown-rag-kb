@@ -53,3 +53,4 @@ python kb.py ingest data/sample_experiments.csv
 - The output should land under `raw/extracts/<kind>/`.
 - After extraction, run `python kb.py distill --force` and `python kb.py index`.
 - If extraction is weak or empty, leave the generated `.extract.md` in place and manually improve its `## 提取文本` section.
+- Any fallback extraction must surface a `warning:` line in CLI output and preserve the warning in the generated `.extract.md`.

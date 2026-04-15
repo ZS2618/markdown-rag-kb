@@ -58,6 +58,10 @@ def now_iso():
     return dt.datetime.now(dt.timezone.utc).astimezone().replace(microsecond=0).isoformat()
 
 
+def warn(message):
+    print(f"warning: {message}")
+
+
 def ensure_dirs():
     for path in (
         VAULT_DIR,
@@ -332,17 +336,26 @@ def extract_raw_file_text(path):
         return extract_xlsx_text(path), []
     if suffix == ".pdf":
         text = extract_pdf_text(path)
-        warnings = []
+        warnings = ["PDF extraction is best-effort with Python stdlib; scanned PDFs need OCR outside this tool."]
         if len(text) < 80:
-            warnings.append("PDF extraction is best-effort with Python stdlib; scanned PDFs need OCR outside this tool.")
+            warnings.append("PDF text extraction was weak; used printable-string fallback where possible.")
             text = text or extract_printable_strings(path)
+        if not text:
+            warnings.append("No text was extracted from this PDF; provide OCR text manually in the generated extract.")
         return text, warnings
     if suffix in {".doc", ".ppt", ".xls"}:
         text = extract_printable_strings(path)
-        return text, [f"Legacy {suffix} extraction is best-effort; convert to .docx/.pptx/.xlsx for better results."]
+        warnings = [f"Legacy {suffix} extraction used printable-string fallback; convert to .docx/.pptx/.xlsx for better results."]
+        if not text:
+            warnings.append(f"No text was extracted from legacy {suffix}; provide converted or OCR text manually.")
+        return text, warnings
     if suffix in {".txt", ".md", ".csv", ".json"}:
         return read_text(path), []
-    return extract_printable_strings(path), ["Unknown file type; extracted printable strings only."]
+    text = extract_printable_strings(path)
+    warnings = ["Unknown file type; used printable-string fallback only."]
+    if not text:
+        warnings.append("No text was extracted from the unknown file type; provide text manually in the generated extract.")
+    return text, warnings
 
 
 def infer_raw_kind(path, explicit_kind=None):
@@ -851,6 +864,18 @@ def experiment_markdown(row, source_path, source_sha):
     return emit_frontmatter(meta) + body
 
 
+def ingest_warnings(row):
+    warnings = []
+    if not row.get("id") and not row.get("source_id"):
+        warnings.append("missing id/source_id; generated stable hash ID")
+    if not row.get("title"):
+        warnings.append("missing title; used generated experiment title")
+    for field in ("summary", "result", "conclusion"):
+        if not row.get(field):
+            warnings.append(f"missing {field}; wrote 待补充 placeholder")
+    return warnings
+
+
 def load_records(source_path):
     suffix = source_path.suffix.lower()
     if suffix == ".csv":
@@ -1088,6 +1113,8 @@ def cmd_ingest(args):
         filename = f"{slugify(experiment_id, 'experiment')}-{slugify(title, 'untitled')}.extract.md"
         target = RAW_EXTRACTS_DIR / "experiments" / filename
         write_text(target, experiment_markdown(row, source_path, source_sha))
+        for item in ingest_warnings(row):
+            warn(f"ingest {target.relative_to(ROOT)}: {item}")
         count += 1
     print(f"Imported {count} experiment extract(s) from {source_path}")
 
@@ -1107,7 +1134,7 @@ def cmd_extract(args):
     print(f"Extracted {source_path} -> {target.relative_to(ROOT)}")
     if warnings:
         for item in warnings:
-            print(f"warning: {item}")
+            warn(item)
 
 
 def list_markdown_documents():
@@ -1164,6 +1191,12 @@ def index_documents(args):
             content = read_text(path)
             meta, body = parse_markdown(content)
             rel_path = str(path.relative_to(ROOT))
+            if not meta:
+                warn(f"index {rel_path}: missing frontmatter; used path-derived metadata fallback")
+            if not meta.get("id"):
+                warn(f"index {rel_path}: missing id; used stable path hash fallback")
+            if not meta.get("title") and not re.search(r"(?m)^#\s+(.+)$", body):
+                warn(f"index {rel_path}: missing title and H1; used filename fallback")
             doc_id = str(meta.get("id") or stable_id("DOC", rel_path))
             title = extract_title(meta, body, path)
             tags = tags_from_value(meta.get("tags"))
@@ -1297,13 +1330,19 @@ def search_chunks(query, limit=5):
             fallback.values(),
             key=lambda row: (-row.get("_score", 0), row["path"], row["chunk_index"]),
         )
-        return ranked[:limit]
+        results = ranked[:limit]
+        for row in results:
+            row["_fallback_warning"] = "FTS5 returned no rows; used SQLite LIKE fallback search."
+        return results
 
 
 def print_results(query, results):
     if not results:
         print("No results found. Try running: python kb.py index")
         return
+    fallback_warnings = sorted({row.get("_fallback_warning") for row in results if row.get("_fallback_warning")})
+    for item in fallback_warnings:
+        warn(item)
     for idx, row in enumerate(results, 1):
         print(f"[{idx}] {row['title']}")
         print(f"    path: {row['path']}")
@@ -1396,10 +1435,13 @@ def cmd_ask(args):
         ]
     )
     if error:
-        print(f"AI not used: {error}")
+        warn(f"ask used local retrieval fallback because AI was not used: {error}")
         print("\nLocal retrieval results:")
         print_results(args.query, results)
         return
+    fallback_warnings = sorted({row.get("_fallback_warning") for row in results if row.get("_fallback_warning")})
+    for item in fallback_warnings:
+        warn(item)
     print(answer)
 
 
@@ -1492,16 +1534,19 @@ def cmd_distill(args):
             if kind not in {"experiment", "literature", "report"}:
                 continue
             target = distill_source_path(source_doc, kind)
+            target_exists = target.exists()
+            if target_exists:
+                old_meta, _ = parse_markdown(read_text(target))
+                if old_meta.get("source_sha256") == source_doc["sha256"] and not getattr(args, "force", False):
+                    continue
             distilled_body = None
             ai_body, ai_error = ai_distillation(kind, title, meta, body, rel_path)
             if ai_body:
                 distilled_body = ai_body
             else:
+                warn(f"distill {rel_path}: used deterministic Python fallback because local AI was not used: {ai_error}")
                 distilled_body, _ = generate_distillation(meta, body, path, rel_path)
-            if target.exists():
-                old_meta, _ = parse_markdown(read_text(target))
-                if old_meta.get("source_sha256") == source_doc["sha256"] and not getattr(args, "force", False):
-                    continue
+            if target_exists:
                 updated += 1
             else:
                 created += 1
@@ -1552,8 +1597,8 @@ def ai_proposal(meta, body, title, path):
         temperature=0.2,
     )
     if answer:
-        return answer
-    return heuristic_proposal(meta, body, title, path) + f"\n\n_AI 未使用原因：{error}_\n"
+        return answer, None
+    return heuristic_proposal(meta, body, title, path) + f"\n\n_AI 未使用原因：{error}_\n", error
 
 
 def cmd_propose(args):
@@ -1586,7 +1631,9 @@ def cmd_propose(args):
                 "status": "pending-review",
                 "updated_at": now_iso(),
             }
-            proposal_body = ai_proposal(meta, body, title, rel_path)
+            proposal_body, ai_error = ai_proposal(meta, body, title, rel_path)
+            if ai_error:
+                warn(f"propose {rel_path}: used heuristic fallback because local AI was not used: {ai_error}")
             write_text(proposal_path, emit_frontmatter(proposal_meta) + proposal_body)
             con.execute(
                 """

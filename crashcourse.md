@@ -210,6 +210,8 @@ python kb.py ask "催化剂 A 的推荐条件是什么"
 
 如果有本地 AI, `distill` 会尽量把这些模板填满；没有 AI 时, 它会用规则和章节提取生成可读版本。无论哪种方式, raw 原始材料都不会直接进入 `vault/`。
 
+凡是发生回退, 命令行都会出现 `warning:`。常见情况包括: PDF best-effort 抽取、旧 Office printable-string 抽取、CSV 缺字段补 `待补充`、无 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索、无本地 AI 时使用规则蒸馏或规则 proposal。
+
 如果你先用无 AI 模式生成过一版, 后来接好了本地 AI, 可以运行:
 
 ```powershell

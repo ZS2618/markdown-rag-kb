@@ -85,3 +85,4 @@ python kb.py search "关键词"
 - Every distilled card must keep source metadata in frontmatter.
 - If local AI is configured through `LOCAL_OPENAI_BASE_URL`, let it fill templates, but do not accept unsupported claims.
 - If local AI is not configured, use the deterministic Python fallback and then refine manually.
+- Any deterministic fallback, heuristic proposal, or placeholder generation must surface a `warning:` line in CLI output.
