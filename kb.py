@@ -507,6 +507,7 @@ def extract_experiment_atoms(meta, body):
         "observations": section_text(body, "关键观察"),
         "conclusion": section_text(body, "结论") or str(meta.get("conclusion") or "").strip(),
         "raw_tags": tags_from_value(meta.get("tags")),
+        "battery": extract_battery_atoms(meta, body),
     }
 
 
@@ -520,6 +521,7 @@ def extract_literature_atoms(meta, body):
         "limitations": section_text(body, "局限", "局限性", "Limitations"),
         "abstract": abstract or first_paragraph(body),
         "keywords": tags_from_value(meta.get("tags")) or bullet_list(sections.get("关键词", "")),
+        "battery": extract_battery_atoms(meta, body),
     }
 
 
@@ -534,7 +536,85 @@ def extract_report_atoms(meta, body):
         "risks": risks,
         "owner": str(meta.get("owner") or "").strip(),
         "deadline": str(meta.get("deadline") or "").strip(),
+        "battery": extract_battery_atoms(meta, body),
     }
+
+
+BATTERY_TERMS = (
+    "锂电", "锂离子", "电池", "电芯", "扣电", "软包", "圆柱", "方壳",
+    "正极", "负极", "电解液", "隔膜", "集流体", "粘结剂", "导电剂",
+    "ncm", "lfp", "lmfp", "lco", "lmo", "石墨", "硅碳", "硬碳", "金属锂",
+    "sei", "cei", "soc", "soh", "容量", "库伦效率", "循环", "倍率", "内阻",
+    "阻抗", "eis", "cv", "gitt", "xrd", "sem", "tem", "xps", "dsc",
+    "lithium", "battery", "cell", "cathode", "anode", "electrolyte",
+    "separator", "capacity", "retention", "impedance", "coulombic",
+)
+
+
+BATTERY_CATEGORIES = {
+    "system": (
+        "锂电", "锂离子", "电池", "电芯", "扣电", "软包", "圆柱", "方壳", "正极", "负极",
+        "电解液", "隔膜", "ncm", "lfp", "lmfp", "lco", "lmo", "石墨", "硅碳", "硬碳",
+        "金属锂", "cell", "cathode", "anode", "electrolyte", "separator",
+    ),
+    "recipe_process": (
+        "配方", "比例", "浆料", "固含", "涂布", "辊压", "面密度", "压实", "烘干", "真空",
+        "注液", "化成", "分容", "老化", "工艺", "synthesis", "slurry", "coating",
+        "calender", "drying", "formation",
+    ),
+    "test_protocol": (
+        "电压", "倍率", "c-rate", "循环", "充放电", "温度", "截止", "静置", "eis", "cv",
+        "gitt", "测试", "voltage", "cycle", "temperature", "protocol",
+    ),
+    "performance": (
+        "容量", "首效", "库伦效率", "保持率", "倍率性能", "能量密度", "功率", "内阻", "阻抗",
+        "膨胀", "产气", "安全", "mAh", "retention", "coulombic", "impedance",
+        "energy density", "swelling",
+    ),
+    "mechanism": (
+        "sei", "cei", "枝晶", "副反应", "析锂", "裂纹", "溶解", "过渡金属", "气体",
+        "失效", "机理", "界面", "阻抗增长", "dendrite", "degradation", "failure",
+        "interface",
+    ),
+}
+
+
+def extract_battery_atoms(meta, body):
+    meta_text = " ".join(str(meta.get(key) or "") for key in ("title", "tags", "summary"))
+    haystack = f"{meta_text}\n{body}".lower()
+    is_relevant = any(term.lower() in haystack for term in BATTERY_TERMS)
+    if not is_relevant:
+        return {"is_relevant": False}
+    return {
+        "is_relevant": True,
+        "system": matching_lines(body, BATTERY_CATEGORIES["system"], "原文未明确电池体系、材料对象或电芯形态。"),
+        "recipe_process": matching_lines(body, BATTERY_CATEGORIES["recipe_process"], "原文未明确配方、制备或电芯工艺窗口。"),
+        "test_protocol": matching_lines(body, BATTERY_CATEGORIES["test_protocol"], "原文未明确电化学测试条件。"),
+        "performance": matching_lines(body, BATTERY_CATEGORIES["performance"], "原文未明确容量、效率、循环、倍率、阻抗或安全指标。"),
+        "mechanism": matching_lines(body, BATTERY_CATEGORIES["mechanism"], "原文未明确失效模式或机理解释。"),
+    }
+
+
+def matching_lines(body, terms, fallback, limit=6):
+    seen = set()
+    lines = []
+    for raw_line in clean_extracted_text(body).splitlines():
+        line = raw_line.strip().strip("|").strip()
+        if len(line) < 3:
+            continue
+        if line.startswith("#"):
+            continue
+        lower = line.lower()
+        if not any(term.lower() in lower for term in terms):
+            continue
+        normalized = re.sub(r"\s+", " ", line)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(f"- {truncate_text(normalized, 180)}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) if lines else fallback
 
 
 def experiment_distillation_body(meta, path, source_path, atoms):
@@ -554,6 +634,7 @@ def experiment_distillation_body(meta, path, source_path, atoms):
         f"{truncate_text(reusable_rule, 260)}\n\n"
         "## 关键条件\n\n"
         f"{conditions}\n\n"
+        f"{lithium_experiment_block(atoms.get('battery'))}"
         "## 证据摘要\n\n"
         f"{observations}\n\n"
         "## 边界与风险\n\n"
@@ -583,6 +664,7 @@ def literature_distillation_body(meta, path, source_path, atoms):
         f"{method}\n\n"
         "## 核心发现\n\n"
         f"{findings}\n\n"
+        f"{lithium_literature_block(atoms.get('battery'))}"
         "## 证据摘要\n\n"
         f"{abstract}\n\n"
         "## 证据强度判断\n\n"
@@ -612,6 +694,7 @@ def report_distillation_body(meta, path, source_path, atoms):
         f"{topic}\n\n"
         "## 关键决定\n\n"
         f"{decisions}\n\n"
+        f"{lithium_report_block(atoms.get('battery'))}"
         "## 行动项\n\n"
         f"{actions}\n\n"
         "## 风险与阻塞\n\n"
@@ -639,6 +722,53 @@ def general_distillation_body(meta, path, source_path, body):
         "待人工补充。\n\n"
         "## 来源\n\n"
         f"- {source_path}\n"
+    )
+
+
+def lithium_experiment_block(battery):
+    if not battery or not battery.get("is_relevant"):
+        return ""
+    return (
+        "## 锂电池体系与研究对象\n\n"
+        f"{battery['system']}\n\n"
+        "## 材料配方与工艺窗口\n\n"
+        f"{battery['recipe_process']}\n\n"
+        "## 电化学测试条件\n\n"
+        f"{battery['test_protocol']}\n\n"
+        "## 关键性能指标\n\n"
+        f"{battery['performance']}\n\n"
+        "## 失效机制与机理线索\n\n"
+        f"{battery['mechanism']}\n\n"
+    )
+
+
+def lithium_literature_block(battery):
+    if not battery or not battery.get("is_relevant"):
+        return ""
+    return (
+        "## 锂电材料体系与应用场景\n\n"
+        f"{battery['system']}\n\n"
+        "## 可复现配方或工艺窗口\n\n"
+        f"{battery['recipe_process']}\n\n"
+        "## 关键性能数据\n\n"
+        f"{battery['performance']}\n\n"
+        "## 机理解释\n\n"
+        f"{battery['mechanism']}\n\n"
+    )
+
+
+def lithium_report_block(battery):
+    if not battery or not battery.get("is_relevant"):
+        return ""
+    return (
+        "## 锂电项目上下文\n\n"
+        f"{battery['system']}\n\n"
+        "## 数据变化与性能信号\n\n"
+        f"{battery['performance']}\n\n"
+        "## 材料工艺决策点\n\n"
+        f"{battery['recipe_process']}\n\n"
+        "## 待验证机理或风险\n\n"
+        f"{battery['mechanism']}\n\n"
     )
 
 
@@ -1277,19 +1407,25 @@ def distillation_prompt(kind, title, meta, body, source_path):
     if kind == "experiment":
         instruction = (
             "请把实验内容蒸馏成可复用知识卡，必须输出以下小节：\n"
-            "1. 一句话结论\n2. 可复用规则\n3. 关键条件\n4. 证据摘要\n5. 边界与风险\n6. 下一步建议\n7. 来源\n"
+            "1. 一句话结论\n2. 可复用规则\n3. 关键条件\n"
+            "4. 如果是锂电池研究，补充：锂电池体系与研究对象、材料配方与工艺窗口、电化学测试条件、关键性能指标、失效机制与机理线索\n"
+            "5. 证据摘要\n6. 边界与风险\n7. 下一步建议\n8. 来源\n"
             "要求只基于原文，不要编造。"
         )
     elif kind == "literature":
         instruction = (
             "请把文献内容蒸馏成可用于内部检索的知识卡，必须输出以下小节：\n"
-            "1. 研究问题\n2. 核心方法\n3. 核心发现\n4. 证据摘要\n5. 证据强度判断\n6. 局限与前提\n7. 对我们可用的点\n8. 关键词\n9. 来源\n"
+            "1. 研究问题\n2. 核心方法\n3. 核心发现\n"
+            "4. 如果是锂电池文献，补充：锂电材料体系与应用场景、可复现配方或工艺窗口、关键性能数据、机理解释\n"
+            "5. 证据摘要\n6. 证据强度判断\n7. 局限与前提\n8. 对我们可用的点\n9. 关键词\n10. 来源\n"
             "要求只基于原文，不要编造。"
         )
     elif kind == "report":
         instruction = (
             "请把小组汇报蒸馏成行动卡，必须输出以下小节：\n"
-            "1. 汇报主题\n2. 关键决定\n3. 行动项\n4. 风险与阻塞\n5. 负责人与截止时间\n6. 会议结论\n7. 来源\n"
+            "1. 汇报主题\n2. 关键决定\n"
+            "3. 如果是锂电池项目汇报，补充：锂电项目上下文、数据变化与性能信号、材料工艺决策点、待验证机理或风险\n"
+            "4. 行动项\n5. 风险与阻塞\n6. 负责人与截止时间\n7. 会议结论\n8. 来源\n"
             "要求只基于原文，不要编造。"
         )
     else:

@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.DS_Store
+**/.DS_Store
 index/*.sqlite
 index/*.sqlite-*
 raw/experiments/*

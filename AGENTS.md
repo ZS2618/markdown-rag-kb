@@ -37,6 +37,7 @@ python kb.py ingest data/sample_experiments.csv
 - Do not put unstructured source material directly into `vault/`.
 - Do not invent facts during distillation.
 - Keep source paths and hashes in frontmatter for traceability.
+- For lithium battery materials, preserve exact source-backed cell chemistry, electrode/electrolyte/separator details, process window, test protocol, performance metrics, and failure-mechanism clues.
 - `index/kb.sqlite` is a rebuildable cache.
 
 ## OpenCode
