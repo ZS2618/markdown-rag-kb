@@ -40,6 +40,8 @@ DATA_DIR = ROOT / "data"
 INDEX_DIR = ROOT / "index"
 DB_PATH = INDEX_DIR / "kb.sqlite"
 SAMPLE_CSV = DATA_DIR / "sample_experiments.csv"
+MAX_PDF_SCAN_BYTES = 1_500_000
+MAX_PDF_TEXT_CHARS = 200_000
 
 KNOWN_FIELDS = {
     "id",
@@ -418,6 +420,7 @@ def decode_pdf_string(value, cmap=None):
 
 
 def extract_pdf_strings(data, cmap=None):
+    data = data[:MAX_PDF_SCAN_BYTES]
     chunks = []
     for match in re.finditer(rb"\((?:\\.|[^\\)]){2,}\)", data, flags=re.DOTALL):
         text = decode_pdf_string(match.group(0)[1:-1], cmap)
@@ -436,19 +439,30 @@ def extract_pdf_strings(data, cmap=None):
         text = max(candidates, key=pdf_text_quality) if candidates else ""
         if re.search(r"[\w\u4e00-\u9fff]", text):
             chunks.append(text)
+        if sum(len(chunk) for chunk in chunks) > MAX_PDF_TEXT_CHARS:
+            break
     return chunks
 
 
 def iter_pdf_objects(data):
-    pattern = rb"(\d+)\s+(\d+)\s+obj(.*?)endobj"
-    for match in re.finditer(pattern, data, flags=re.DOTALL):
-        obj_id = int(match.group(1))
-        body = match.group(3)
-        stream_match = re.search(rb"(.*?)stream\r?\n(.*?)\r?\nendstream", body, flags=re.DOTALL)
-        if stream_match:
-            yield obj_id, stream_match.group(1), stream_match.group(2)
-        else:
-            yield obj_id, body, None
+    offset = 0
+    while True:
+        stream_start = data.find(b"stream", offset)
+        if stream_start < 0:
+            break
+        stream_data_start = stream_start + len(b"stream")
+        if data[stream_data_start : stream_data_start + 2] == b"\r\n":
+            stream_data_start += 2
+        elif data[stream_data_start : stream_data_start + 1] in (b"\n", b"\r"):
+            stream_data_start += 1
+        stream_end = data.find(b"endstream", stream_data_start)
+        if stream_end < 0:
+            break
+        dictionary_start = max(0, stream_start - 5000)
+        obj_start = data.rfind(b"obj", dictionary_start, stream_start)
+        dictionary = data[obj_start + 3 : stream_start] if obj_start >= 0 else data[dictionary_start:stream_start]
+        yield 0, dictionary, data[stream_data_start:stream_end]
+        offset = stream_end + len(b"endstream")
 
 
 def decode_pdf_stream(dictionary, stream):
@@ -537,18 +551,20 @@ def extract_pdf_text(path):
         decoded = decode_pdf_stream(dictionary, stream)
         if not decoded:
             continue
+        decoded = decoded[:MAX_PDF_SCAN_BYTES]
         decoded_streams.append((dictionary, decoded))
         if b"beginbfchar" in decoded or b"beginbfrange" in decoded:
             cmap.update(parse_cmap_text(decoded))
 
-    chunks = extract_pdf_strings(non_stream, cmap)
+    chunks = []
     for dictionary, stream in decoded_streams:
         if b"beginbfchar" in stream or b"beginbfrange" in stream:
             continue
         if not any(token in stream for token in (b"BT", b"Tj", b"TJ", b"Tf", b"ET")):
             continue
         chunks.extend(extract_pdf_text_operands(stream, cmap))
-        chunks.extend(extract_pdf_strings(stream, cmap))
+        if sum(len(chunk) for chunk in chunks) > MAX_PDF_TEXT_CHARS:
+            break
 
     cleaned = clean_extracted_text("\n".join(chunks))
     lines = list(meaningful_text_lines(cleaned, min_chars=4))
