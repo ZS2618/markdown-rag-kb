@@ -16,7 +16,17 @@ raw/reports/        PDF、PPT、小组汇报材料
 
 ## 文本摘录
 
-第一版不依赖第三方包, 不直接解析 PDF、PPT、Excel。请先用公司允许的工具或本地 AI 把原始文件转成文本摘录, 放到:
+第一版不依赖第三方包。可以用项目内置命令先做一轮基础提取:
+
+```powershell
+python kb.py extract raw/literature/example.pdf --kind literature --title "文献标题"
+python kb.py extract raw/reports/weekly.pptx --kind report --title "小组汇报"
+python kb.py extract raw/experiments/run.xlsx --kind experiment --title "实验记录"
+```
+
+内置提取支持 `.pdf`、`.docx`、`.pptx`、`.xlsx` 和文本类文件。旧 `.doc`、`.ppt`、`.xls` 只能做可打印字符串兜底, 推荐先转换成现代 Office 格式。扫描版 PDF 需要公司允许的 OCR 或本地 AI。
+
+你也可以用公司允许的工具或本地 AI 把原始文件转成文本摘录, 放到:
 
 ```text
 raw/extracts/experiments/*.extract.md

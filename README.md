@@ -16,6 +16,7 @@ python kb.py demo
 
 ```powershell
 python kb.py init
+python kb.py extract raw/literature/example.pdf --kind literature --title "文献标题"
 python kb.py ingest data/sample_experiments.csv
 python kb.py index
 python kb.py search "催化剂"
@@ -25,8 +26,22 @@ python kb.py distill
 ```
 
 `ask` 会先做本地检索，再尝试调用公司内网 OpenAI 兼容接口。如果没有配置 AI，它会自动降级为检索结果，不会联网。
+`extract` 会把 PDF、PPTX、DOCX、XLSX 或文本类原始文件转成 `raw/extracts/**/*.extract.md`。
 `distill` 会读取 `raw/extracts/` 里的文本摘录，把实验、文献和小组汇报压缩成可检索的结构化知识卡，并写入 `vault/`。
 如果你后来接入了本地 AI, 可以用 `python kb.py distill --force` 重新生成已有知识卡。
+
+## OpenCode Agent
+
+本项目已经包含 OpenCode 项目级配置:
+
+```text
+opencode.json
+.opencode/agents/kb-curator.md
+.opencode/skills/raw-extract/SKILL.md
+.opencode/skills/knowledge-distill/SKILL.md
+```
+
+建议在 OpenCode 中使用 `kb-curator` agent。它会遵守 raw/vault 分层规则: 原始文件只进 `raw/`, 摘录只进 `raw/extracts/`, 结构化知识卡才进 `vault/`。
 
 ## 本地 AI 配置
 
@@ -66,6 +81,26 @@ JSON 支持对象数组：
 ```
 
 也支持 `{ "experiments": [...] }`。
+
+## 原始文件提取
+
+第一版坚持零第三方依赖, 所以提取能力是保守的:
+
+- `.docx`: 读取 Word ZIP/XML 文本
+- `.pptx`: 读取 PowerPoint ZIP/XML 幻灯片文本
+- `.xlsx`: 读取 Excel ZIP/XML 单元格文本
+- `.pdf`: 尽力读取 PDF 字符串和 Flate 压缩流; 扫描版 PDF 需要外部 OCR
+- `.doc`、`.ppt`、`.xls`: 只能做可打印字符串兜底; 推荐先转成现代 Office 格式
+
+示例:
+
+```powershell
+python kb.py extract raw/literature/paper.pdf --kind literature --title "论文标题"
+python kb.py extract raw/reports/weekly.pptx --kind report --title "小组周报"
+python kb.py extract raw/experiments/run.xlsx --kind experiment --title "实验记录"
+python kb.py distill --force
+python kb.py index
+```
 
 ## 知识库约定
 

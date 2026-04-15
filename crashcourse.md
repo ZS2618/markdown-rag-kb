@@ -44,6 +44,7 @@ index/kb.sqlite       派生索引, 可以删除后重建
 
 ```powershell
 python kb.py init
+python kb.py extract raw/literature/example.pdf --kind literature --title "文献标题"
 python kb.py ingest data/sample_experiments.csv
 python kb.py index
 python kb.py search "催化剂"
@@ -59,6 +60,9 @@ python kb.py distill
 
 `ingest`
 : 把 CSV 或 JSON 实验数据转成 Markdown。
+
+`extract`
+: 把 PDF、PPTX、DOCX、XLSX 或文本类原始文件转成 `raw/extracts/**/*.extract.md`。
 
 `index`
 : 扫描 `vault/**/*.md`, 重新建立 SQLite 索引。
@@ -106,7 +110,17 @@ raw/literature/     PDF 文献
 raw/reports/        PDF、PPT、会议材料
 ```
 
-因为第一版零第三方依赖, 不直接解析 PDF、PPT、Excel。你可以先用公司允许的工具或本地 AI 把原始文件摘成文本, 放到 `raw/extracts/`。
+因为第一版零第三方依赖, PDF/PPT/Word/Excel 提取是保守能力。你可以先运行内置提取命令:
+
+```powershell
+python kb.py extract raw/literature/paper.pdf --kind literature --title "论文标题"
+python kb.py extract raw/reports/weekly.pptx --kind report --title "小组周报"
+python kb.py extract raw/experiments/run.xlsx --kind experiment --title "实验记录"
+```
+
+`.docx/.pptx/.xlsx` 会通过 ZIP/XML 读取文本。PDF 是 best-effort 提取, 扫描版 PDF 需要外部 OCR。旧 `.doc/.ppt/.xls` 建议先转成现代 Office 格式。
+
+你也可以用公司允许的工具或本地 AI 把原始文件摘成文本, 放到 `raw/extracts/`。
 
 摘录文件的最小格式像这样:
 
@@ -201,13 +215,14 @@ python kb.py index
 
 1. `python kb.py init`
 2. 把原始 PDF、PPT、Excel 放进 `raw/` 对应目录
-3. 把原始材料摘录成 `raw/extracts/**/*.extract.md`
-4. 如果是 CSV 或 JSON 实验导出, 可以用 `python kb.py ingest 你的文件.csv` 自动生成实验摘录
-5. `python kb.py distill`
-6. `python kb.py index`
-7. `python kb.py search "你关心的关键词"`
-8. `python kb.py ask "完整问题"`
-9. `python kb.py propose`
+3. 用 `python kb.py extract 原始文件 --kind 类型` 生成摘录
+4. 把自动提取不准的地方人工补进 `raw/extracts/**/*.extract.md`
+5. 如果是 CSV 或 JSON 实验导出, 可以用 `python kb.py ingest 你的文件.csv` 自动生成实验摘录
+6. `python kb.py distill`
+7. `python kb.py index`
+8. `python kb.py search "你关心的关键词"`
+9. `python kb.py ask "完整问题"`
+10. `python kb.py propose`
 
 ## 常见坑
 

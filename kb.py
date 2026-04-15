@@ -18,6 +18,9 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
 
 
 ROOT = Path(__file__).resolve().parent
@@ -176,6 +179,230 @@ def markdown_table(rows):
         safe_value = str(value).replace("|", "\\|").replace("\n", " ").strip()
         out.append(f"| {key} | {safe_value} |")
     return "\n".join(out) + "\n"
+
+
+def clean_extracted_text(text):
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def xml_texts(xml_bytes, tag_suffixes):
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
+    values = []
+    for node in root.iter():
+        if any(node.tag.endswith(suffix) for suffix in tag_suffixes) and node.text:
+            value = node.text.strip()
+            if value:
+                values.append(value)
+    return values
+
+
+def extract_docx_text(path):
+    parts = []
+    with zipfile.ZipFile(path) as archive:
+        names = sorted(
+            name
+            for name in archive.namelist()
+            if name == "word/document.xml"
+            or name.startswith("word/header")
+            or name.startswith("word/footer")
+        )
+        for name in names:
+            texts = xml_texts(archive.read(name), ("}t", "}instrText"))
+            if texts:
+                parts.append("\n".join(texts))
+    return clean_extracted_text("\n\n".join(parts))
+
+
+def extract_pptx_text(path):
+    slides = []
+    with zipfile.ZipFile(path) as archive:
+        names = sorted(name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml"))
+        for idx, name in enumerate(names, 1):
+            texts = xml_texts(archive.read(name), ("}t",))
+            if texts:
+                slides.append(f"## Slide {idx}\n\n" + "\n".join(texts))
+    return clean_extracted_text("\n\n".join(slides))
+
+
+def extract_xlsx_text(path):
+    with zipfile.ZipFile(path) as archive:
+        shared_strings = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            shared_strings = xml_texts(archive.read("xl/sharedStrings.xml"), ("}t",))
+        rows = []
+        sheet_names = sorted(name for name in archive.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
+        for sheet_idx, name in enumerate(sheet_names, 1):
+            try:
+                root = ET.fromstring(archive.read(name))
+            except ET.ParseError:
+                continue
+            rows.append(f"## Sheet {sheet_idx}")
+            for row in root.iter():
+                if not row.tag.endswith("}row"):
+                    continue
+                cells = []
+                for cell in row:
+                    if not cell.tag.endswith("}c"):
+                        continue
+                    cell_type = cell.attrib.get("t", "")
+                    value = ""
+                    for child in cell:
+                        if child.tag.endswith("}v") and child.text:
+                            value = child.text.strip()
+                        elif child.tag.endswith("}is"):
+                            inline = " ".join(xml_texts(ET.tostring(child), ("}t",)))
+                            if inline:
+                                value = inline
+                    if cell_type == "s" and value.isdigit():
+                        idx = int(value)
+                        if 0 <= idx < len(shared_strings):
+                            value = shared_strings[idx]
+                    if value:
+                        cells.append(value)
+                if cells:
+                    rows.append(" | ".join(cells))
+    return clean_extracted_text("\n".join(rows))
+
+
+def decode_pdf_string(value):
+    value = value.replace(rb"\\(", b"(").replace(rb"\\)", b")").replace(rb"\\\\", b"\\")
+    for encoding in ("utf-16-be", "utf-8", "latin-1"):
+        try:
+            decoded = value.decode(encoding)
+            if decoded.strip():
+                return decoded
+        except UnicodeDecodeError:
+            continue
+    return ""
+
+
+def extract_pdf_strings(data):
+    chunks = []
+    for match in re.finditer(rb"\((?:\\.|[^\\)]){2,}\)", data, flags=re.DOTALL):
+        text = decode_pdf_string(match.group(0)[1:-1])
+        if re.search(r"[\w\u4e00-\u9fff]", text):
+            chunks.append(text)
+    for match in re.finditer(rb"<([0-9A-Fa-f\s]{8,})>", data):
+        raw = re.sub(rb"\s+", b"", match.group(1))
+        try:
+            text = bytes.fromhex(raw.decode("ascii")).decode("utf-16-be", errors="ignore")
+        except ValueError:
+            text = ""
+        if re.search(r"[\w\u4e00-\u9fff]", text):
+            chunks.append(text)
+    return chunks
+
+
+def extract_pdf_text(path):
+    data = path.read_bytes()
+    chunks = extract_pdf_strings(data)
+    for match in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, flags=re.DOTALL):
+        before = data[max(0, match.start() - 300) : match.start()]
+        stream = match.group(1)
+        if b"FlateDecode" in before:
+            try:
+                stream = zlib.decompress(stream)
+            except zlib.error:
+                continue
+        chunks.extend(extract_pdf_strings(stream))
+    return clean_extracted_text("\n".join(chunks))
+
+
+def extract_printable_strings(path, min_len=6):
+    data = path.read_bytes()
+    text = data.decode("latin-1", errors="ignore")
+    strings = re.findall(r"[ -~\u00a0-\u00ff]{%d,}" % min_len, text)
+    filtered = [item.strip() for item in strings if re.search(r"[A-Za-z0-9]", item)]
+    return clean_extracted_text("\n".join(filtered[:300]))
+
+
+def extract_raw_file_text(path):
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        return extract_docx_text(path), []
+    if suffix == ".pptx":
+        return extract_pptx_text(path), []
+    if suffix == ".xlsx":
+        return extract_xlsx_text(path), []
+    if suffix == ".pdf":
+        text = extract_pdf_text(path)
+        warnings = []
+        if len(text) < 80:
+            warnings.append("PDF extraction is best-effort with Python stdlib; scanned PDFs need OCR outside this tool.")
+            text = text or extract_printable_strings(path)
+        return text, warnings
+    if suffix in {".doc", ".ppt", ".xls"}:
+        text = extract_printable_strings(path)
+        return text, [f"Legacy {suffix} extraction is best-effort; convert to .docx/.pptx/.xlsx for better results."]
+    if suffix in {".txt", ".md", ".csv", ".json"}:
+        return read_text(path), []
+    return extract_printable_strings(path), ["Unknown file type; extracted printable strings only."]
+
+
+def infer_raw_kind(path, explicit_kind=None):
+    if explicit_kind:
+        return explicit_kind
+    try:
+        rel_parts = [part.lower() for part in path.relative_to(RAW_DIR).parts]
+    except ValueError:
+        rel_parts = [part.lower() for part in path.parts]
+    if "literature" in rel_parts:
+        return "literature"
+    if "reports" in rel_parts or "report" in rel_parts:
+        return "report"
+    if "experiments" in rel_parts or "experiment" in rel_parts:
+        return "experiment"
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return "literature"
+    if suffix in {".ppt", ".pptx", ".doc", ".docx"}:
+        return "report"
+    if suffix in {".xls", ".xlsx", ".csv", ".json"}:
+        return "experiment"
+    return "report"
+
+
+def raw_kind_extract_dir(kind):
+    if kind == "literature":
+        return RAW_EXTRACTS_DIR / "literature"
+    if kind == "report":
+        return RAW_EXTRACTS_DIR / "reports"
+    return RAW_EXTRACTS_DIR / "experiments"
+
+
+def raw_extract_markdown(path, kind, title, text, warnings):
+    source_sha = sha256_file(path)
+    source_id = stable_id(kind.upper(), f"{path.name}:{source_sha}")
+    meta = {
+        "id": source_id,
+        "type": "raw-extract",
+        "raw_kind": kind,
+        "title": title,
+        "source_system": "raw-file",
+        "source_id": source_id,
+        "status": "extracted",
+        "tags": [],
+        "raw_file_path": str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path),
+        "raw_file_sha256": source_sha,
+        "updated_at": now_iso(),
+    }
+    warning_text = "\n".join(f"- {item}" for item in warnings) if warnings else "- 无"
+    body = (
+        f"# {title}\n\n"
+        "## 摘要\n\n"
+        "待蒸馏。\n\n"
+        "## 提取文本\n\n"
+        f"{text or '未能自动提取文本，请人工补充。'}\n\n"
+        "## 提取警告\n\n"
+        f"{warning_text}\n"
+    )
+    return source_id, emit_frontmatter(meta) + body
 
 
 def extract_sections(body):
@@ -735,6 +962,24 @@ def cmd_ingest(args):
     print(f"Imported {count} experiment extract(s) from {source_path}")
 
 
+def cmd_extract(args):
+    ensure_dirs()
+    source_path = (ROOT / args.source).resolve() if not Path(args.source).is_absolute() else Path(args.source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Raw source not found: {source_path}")
+    kind = infer_raw_kind(source_path, args.kind)
+    title = args.title or source_path.stem
+    text, warnings = extract_raw_file_text(source_path)
+    source_id, content = raw_extract_markdown(source_path, kind, title, text, warnings)
+    filename = f"{slugify(source_id, 'raw')}-{slugify(title, 'untitled')}.extract.md"
+    target = raw_kind_extract_dir(kind) / filename
+    write_text(target, content)
+    print(f"Extracted {source_path} -> {target.relative_to(ROOT)}")
+    if warnings:
+        for item in warnings:
+            print(f"warning: {item}")
+
+
 def list_markdown_documents():
     if not VAULT_DIR.exists():
         return []
@@ -1240,6 +1485,12 @@ def build_parser():
     ingest_cmd = sub.add_parser("ingest", help="Import CSV/JSON experiment data into raw extract Markdown.")
     ingest_cmd.add_argument("source", help="Path to a CSV or JSON file.")
     ingest_cmd.set_defaults(func=cmd_ingest)
+
+    extract_cmd = sub.add_parser("extract", help="Extract raw PDF/Office/text files into raw extract Markdown.")
+    extract_cmd.add_argument("source", help="Path to a raw PDF, DOCX, PPTX, XLSX, or text-like file.")
+    extract_cmd.add_argument("--kind", choices=("experiment", "literature", "report"), help="Override inferred raw kind.")
+    extract_cmd.add_argument("--title", help="Override extracted note title.")
+    extract_cmd.set_defaults(func=cmd_extract)
 
     index_cmd = sub.add_parser("index", help="Rebuild SQLite FTS index from Markdown.")
     index_cmd.set_defaults(func=index_documents)

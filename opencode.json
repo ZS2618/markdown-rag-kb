@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "skill": {
+      "*": "ask",
+      "raw-extract": "allow",
+      "knowledge-distill": "allow"
+    }
+  }
+}
