@@ -23,12 +23,18 @@ python kb.py search "催化剂"
 python kb.py ask "催化剂 A 的推荐条件是什么"
 python kb.py propose
 python kb.py distill
+python kb.py sync
+python kb.py update-proposals
+python kb.py links
+python kb.py apply-proposal vault/proposals/PROP-xxx.md
 ```
 
 `ask` 会先做本地检索，再尝试调用公司内网 OpenAI 兼容接口。如果没有配置 AI，它会自动降级为检索结果，不会联网。
 `extract` 会把 PDF、PPTX、DOCX、XLSX 或文本类原始文件转成 `raw/extracts/**/*.extract.md`。
 `distill` 会读取 `raw/extracts/` 里的文本摘录，把实验、文献和小组汇报压缩成可检索的结构化知识卡，并写入 `vault/`。
 如果你后来接入了本地 AI, 可以用 `python kb.py distill --force` 重新生成已有知识卡。
+
+`sync`、`update-proposals`、`links`、`apply-proposal` 是增量演化命令。它们不会让 AI 或规则直接改正式库, 而是先生成 `vault/proposals/` 草案, 人工确认后再应用。
 
 ## OpenCode Agent
 
@@ -129,6 +135,109 @@ vault/proposals/
 ```
 
 `propose` 不会自动修改正式 Markdown。人工审核通过后，再手动把建议整理到正式知识库。
+
+## 增量更新和知识演化
+
+全量索引用 `python kb.py index` 重建, 但 `vault/` 本身的增量演化使用 proposal 流程:
+
+```text
+raw/extracts/*.extract.md
+  -> python kb.py sync
+  -> python kb.py update-proposals
+  -> 人工审核 vault/proposals/*.md
+  -> python kb.py apply-proposal vault/proposals/PROP-xxx.md
+  -> python kb.py index
+```
+
+### 1. 查看 raw 和 vault 是否同步
+
+```powershell
+python kb.py sync
+```
+
+输出会列出:
+
+- `new extracts`: 有新的 `raw/extracts/**/*.extract.md`, 但还没有对应 vault 卡
+- `changed extracts`: raw 摘录哈希变了, 对应 vault 卡需要更新
+- `unchanged extracts`: raw 摘录和 vault 卡的 `source_sha256` 一致
+- `stale vault cards`: vault 卡记录的来源 extract 不存在, 需要人工判断保留、迁移或废弃
+- `Possible related cards`: 新内容和旧 vault 卡的候选关联数量
+
+### 2. 为新增和变更生成更新草案
+
+```powershell
+python kb.py update-proposals
+```
+
+它会为新增或变更的 extract 生成 `vault/proposals/PROP-ADD-*.md` 或 `vault/proposals/PROP-UPDATE-*.md`。
+
+proposal 里包含:
+
+- 为什么建议新增或更新
+- 目标 vault 路径
+- 来源 extract 路径和 SHA256
+- 候选关联旧卡
+- 完整的建议 Markdown, 包在 `BEGIN_PROPOSED_MARKDOWN` 和 `END_PROPOSED_MARKDOWN` 之间
+
+不会自动改 `vault/experiments/`、`vault/literature/` 或 `vault/reports/`。
+
+### 3. 为旧卡之间生成关联草案
+
+```powershell
+python kb.py links
+```
+
+`links` 会扫描现有 vault 卡, 用标题、标签、正文关键词和锂电池术语做规则匹配, 生成 `PROP-LINK-*.md`。它适合在批量导入文献后运行, 用来发现“同一材料体系”“同一测试方法”“同一失效机理”等候选关系。
+
+可调参数:
+
+```powershell
+python kb.py links --min-score 6 --limit 20
+```
+
+分数越高越保守。`limit` 控制最多生成多少个关联 proposal。
+
+### 4. 人工审核后应用 proposal
+
+```powershell
+python kb.py apply-proposal vault/proposals/PROP-ADD-xxxx.md
+python kb.py apply-proposal vault/proposals/PROP-UPDATE-xxxx.md
+python kb.py apply-proposal vault/proposals/PROP-LINK-xxxx.md
+```
+
+`apply-proposal` 只处理已经存在的 proposal 文件:
+
+- `add`: 写入新的 vault 卡
+- `update`: 覆盖目标 vault 卡为 proposal 中审核过的建议 Markdown
+- `link`: 给目标 vault 卡 frontmatter 的 `related` 增加关联 ID, 并在正文追加 `## 关联知识`
+
+应用后 proposal 的 `status` 会改成 `applied`, 并写入 `applied_at`。
+
+### 5. vault 关系字段
+
+新生成的知识卡会保留这些关系字段:
+
+```yaml
+supersedes: []
+supports: []
+contradicts: []
+related: []
+derived_from: [raw/extracts/...]
+version: 1
+review_status: structured-draft
+```
+
+含义:
+
+- `supersedes`: 替代哪些旧结论
+- `supports`: 支持哪些旧结论
+- `contradicts`: 和哪些旧结论冲突
+- `related`: 普通相关
+- `derived_from`: 来源 extract
+- `version`: 卡片版本, update proposal 会递增
+- `review_status`: 人工审核状态
+
+注意: 第一版 `supports/contradicts/supersedes` 不自动判定, 只自动生成 `related` 候选。涉及支持、反驳、替代的判断需要人工在 proposal 或 vault 卡里明确编辑。
 
 ## 知识蒸馏模板
 

@@ -51,6 +51,10 @@ python kb.py search "催化剂"
 python kb.py ask "催化剂 A 的推荐条件是什么"
 python kb.py propose
 python kb.py distill
+python kb.py sync
+python kb.py update-proposals
+python kb.py links
+python kb.py apply-proposal vault/proposals/PROP-xxx.md
 ```
 
 每个命令的作用:
@@ -78,6 +82,18 @@ python kb.py distill
 
 `distill`
 : 读取 `raw/extracts/`, 把实验、文献和小组汇报压缩成可检索的知识卡, 放到 `vault/`。
+
+`sync`
+: 对比 `raw/extracts/` 和 `vault/`, 找出新增、变更、已同步和来源缺失的卡片。
+
+`update-proposals`
+: 为新增或变更的 extract 生成 add/update proposal, 不直接修改正式 vault。
+
+`links`
+: 为现有 vault 卡生成候选关联 proposal。
+
+`apply-proposal`
+: 人工审核 proposal 后, 把 add/update/link proposal 应用到正式 vault。
 
 ## 导入数据
 
@@ -192,6 +208,81 @@ python kb.py ask "催化剂 A 的推荐条件是什么"
 
 第一版不会自动改正式知识库, 这是故意的, 这样更适合有审计要求的环境。
 
+## 增量更新 vault
+
+`index` 是全量重建 SQLite 缓存, 但 `vault/` 的演化要走增量 proposal:
+
+```powershell
+python kb.py sync
+python kb.py update-proposals
+python kb.py links
+```
+
+`sync` 会告诉你当前状态:
+
+```text
+new extracts       新 raw 摘录, 还没有 vault 卡
+changed extracts   raw 摘录变了, vault 卡需要更新
+unchanged extracts raw 和 vault 的 source_sha256 一致
+stale vault cards  vault 卡的来源 extract 找不到
+```
+
+`update-proposals` 会生成两类文件:
+
+```text
+vault/proposals/PROP-ADD-xxxx.md
+vault/proposals/PROP-UPDATE-xxxx.md
+```
+
+每个 proposal 都会包含完整的建议 Markdown:
+
+```markdown
+<!-- BEGIN_PROPOSED_MARKDOWN -->
+---
+id: DIST-...
+related: [...]
+version: 2
+---
+
+# 蒸馏卡：...
+<!-- END_PROPOSED_MARKDOWN -->
+```
+
+你可以先人工修改 proposal 里的建议 Markdown, 再应用:
+
+```powershell
+python kb.py apply-proposal vault/proposals/PROP-UPDATE-xxxx.md
+python kb.py index
+```
+
+`links` 只做“新旧内容建立关系”:
+
+```powershell
+python kb.py links --min-score 6 --limit 20
+```
+
+它会生成 `PROP-LINK-*.md`, 审核后运行:
+
+```powershell
+python kb.py apply-proposal vault/proposals/PROP-LINK-xxxx.md
+```
+
+应用后, 目标 vault 卡会在 frontmatter 的 `related` 里增加关联卡 ID, 正文也会出现 `## 关联知识`。
+
+新卡默认带这些关系字段:
+
+```yaml
+supersedes: []
+supports: []
+contradicts: []
+related: []
+derived_from: [raw/extracts/...]
+version: 1
+review_status: structured-draft
+```
+
+第一版会自动建议 `related`, 不自动判断 `supports/contradicts/supersedes`。这些更强关系必须人工审核后填写。
+
 ## 知识蒸馏模板
 
 默认有三种提取方式:
@@ -232,7 +323,11 @@ python kb.py index
 7. `python kb.py index`
 8. `python kb.py search "你关心的关键词"`
 9. `python kb.py ask "完整问题"`
-10. `python kb.py propose`
+10. `python kb.py sync`
+11. `python kb.py update-proposals`
+12. 审核 `vault/proposals/`
+13. `python kb.py apply-proposal vault/proposals/PROP-xxx.md`
+14. `python kb.py links`
 
 ## 常见坑
 

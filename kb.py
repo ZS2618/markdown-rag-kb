@@ -178,6 +178,17 @@ def tags_from_value(value):
     return [part.strip() for part in re.split(r"[,;，；]", str(value)) if part.strip()]
 
 
+def list_from_meta(meta, key):
+    return tags_from_value(meta.get(key))
+
+
+def add_unique(items, value):
+    value = str(value or "").strip()
+    if value and value not in items:
+        items.append(value)
+    return items
+
+
 def markdown_table(rows):
     if not rows:
         return "无\n"
@@ -1165,6 +1176,13 @@ def distill_target_meta(source_doc, source_sha, kind):
         "source_path": source_path,
         "source_sha256": source_sha,
         "template_kind": kind,
+        "supersedes": [],
+        "supports": [],
+        "contradicts": [],
+        "related": [],
+        "derived_from": [source_path],
+        "version": 1,
+        "review_status": "structured-draft",
         "updated_at": now_iso(),
     }
 
@@ -1869,6 +1887,244 @@ def save_distillation(source_doc, kind, body):
     return target
 
 
+def markdown_record(path, root=ROOT):
+    content = read_text(path)
+    meta, body = parse_markdown(content)
+    return {
+        "path": path,
+        "rel_path": str(path.relative_to(root)),
+        "content": content,
+        "meta": meta,
+        "body": body,
+        "id": str(meta.get("id") or stable_id("DOC", str(path))),
+        "title": extract_title(meta, body, path),
+        "sha256": sha256_bytes(content.encode("utf-8")),
+        "kind": doc_kind(meta, path),
+    }
+
+
+def raw_extract_record(path):
+    record = markdown_record(path)
+    record["source_doc"] = {
+        "id": record["id"],
+        "path": record["rel_path"],
+        "title": record["title"],
+        "sha256": record["sha256"],
+    }
+    record["target_path"] = distill_source_path(record["source_doc"], record["kind"])
+    return record
+
+
+def vault_records():
+    return [markdown_record(path) for path in list_markdown_documents()]
+
+
+def sync_plan():
+    raw_records = [raw_extract_record(path) for path in list_raw_extract_documents()]
+    vault_by_source = {}
+    vault_by_path = {}
+    for record in vault_records():
+        source_id = str(record["meta"].get("source_document_id") or "")
+        if source_id:
+            vault_by_source[source_id] = record
+        vault_by_path[record["rel_path"]] = record
+
+    new_extracts = []
+    changed_extracts = []
+    unchanged_extracts = []
+    stale_vault_cards = []
+    raw_source_ids = {record["id"] for record in raw_records}
+    for record in raw_records:
+        target_rel = str(record["target_path"].relative_to(ROOT))
+        target = vault_by_source.get(record["id"]) or vault_by_path.get(target_rel)
+        record["target_record"] = target
+        if not target:
+            new_extracts.append(record)
+        elif target["meta"].get("source_sha256") != record["sha256"]:
+            changed_extracts.append(record)
+        else:
+            unchanged_extracts.append(record)
+
+    for record in vault_records():
+        source_id = str(record["meta"].get("source_document_id") or "")
+        if source_id and source_id not in raw_source_ids:
+            stale_vault_cards.append(record)
+
+    return {
+        "raw_records": raw_records,
+        "vault_records": vault_records(),
+        "new_extracts": new_extracts,
+        "changed_extracts": changed_extracts,
+        "unchanged_extracts": unchanged_extracts,
+        "stale_vault_cards": stale_vault_cards,
+    }
+
+
+def relation_terms(record):
+    text = f"{record['title']}\n{' '.join(tags_from_value(record['meta'].get('tags')))}\n{record['body']}"
+    lower = text.lower()
+    terms = set()
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9+./-]{2,}|[\u4e00-\u9fff]{2,}", lower):
+        if len(term) >= 2:
+            terms.add(term)
+    for term in BATTERY_TERMS:
+        if term.lower() in lower:
+            terms.add(term.lower())
+    return terms
+
+
+def relation_score(left, right):
+    left_terms = relation_terms(left)
+    right_terms = relation_terms(right)
+    overlap = left_terms & right_terms
+    score = 0
+    score += min(len(overlap), 12)
+    if left["kind"] == right["kind"]:
+        score += 1
+    left_source = str(left["meta"].get("source_document_id") or left["id"])
+    right_source = str(right["meta"].get("source_document_id") or right["id"])
+    if left_source and right_source and left_source == right_source:
+        score += 10
+    for token in ("doi", "ncm", "lfp", "lmfp", "graphite", "石墨", "电解液", "impedance", "eis", "sei", "cei"):
+        if token in overlap:
+            score += 2
+    return score, sorted(overlap)[:12]
+
+
+def existing_relation_ids(record):
+    ids = set()
+    for key in ("related", "supports", "contradicts", "supersedes"):
+        ids.update(list_from_meta(record["meta"], key))
+    return ids
+
+
+def find_related_records(record, candidates, limit=5, min_score=3):
+    related = []
+    existing = existing_relation_ids(record)
+    for candidate in candidates:
+        if candidate["id"] == record["id"] or candidate["id"] in existing:
+            continue
+        score, overlap = relation_score(record, candidate)
+        if score >= min_score:
+            related.append((score, overlap, candidate))
+    related.sort(key=lambda item: (-item[0], item[2]["rel_path"]))
+    return related[:limit]
+
+
+def relation_section(related):
+    if not related:
+        return ""
+    lines = ["## 关联知识", ""]
+    for score, overlap, record in related:
+        why = ", ".join(overlap[:6]) if overlap else "标题或主题相近"
+        lines.append(f"- related: `{record['id']}` - {record['title']} (`{record['rel_path']}`), score={score}, overlap={why}")
+    return "\n".join(lines) + "\n\n"
+
+
+def proposed_distilled_markdown(raw_record, related):
+    source_doc = raw_record["source_doc"]
+    body, kind = generate_distillation(raw_record["meta"], raw_record["body"], raw_record["path"], raw_record["rel_path"])
+    target = raw_record.get("target_record")
+    meta = distill_target_meta(source_doc, raw_record["sha256"], kind)
+    if target:
+        old_meta = target["meta"]
+        meta["id"] = old_meta.get("id") or meta["id"]
+        meta["status"] = old_meta.get("status") or meta["status"]
+        meta["review_status"] = old_meta.get("review_status") or meta["review_status"]
+        meta["version"] = int(str(old_meta.get("version") or "1")) + 1
+        for key in ("supersedes", "supports", "contradicts", "related"):
+            meta[key] = list_from_meta(old_meta, key)
+    for _, _, record in related:
+        add_unique(meta["related"], record["id"])
+    body = body.rstrip() + "\n\n" + relation_section(related)
+    body += "## 更新记录\n\n"
+    if target:
+        body += f"- {now_iso()}: 根据 `{raw_record['rel_path']}` 生成更新草案, 旧版本为 v{target['meta'].get('version') or 1}。\n"
+    else:
+        body += f"- {now_iso()}: 根据 `{raw_record['rel_path']}` 生成新增草案。\n"
+    return emit_frontmatter(meta) + body
+
+
+def proposal_path_for(action, key):
+    proposal_id = f"PROP-{action.upper()}-{stable_id('', key).lstrip('-')}"
+    return proposal_id, PROPOSALS_DIR / f"{slugify(proposal_id, 'proposal')}.md"
+
+
+def write_update_proposal(raw_record, related, force=False):
+    target = raw_record.get("target_record")
+    action = "update" if target else "add"
+    target_path = str(raw_record["target_path"].relative_to(ROOT))
+    proposal_id, proposal_path = proposal_path_for(action, f"{raw_record['rel_path']}->{target_path}")
+    if proposal_path.exists() and not force:
+        return False, proposal_path
+    proposed = proposed_distilled_markdown(raw_record, related)
+    meta = {
+        "id": proposal_id,
+        "type": "update-proposal",
+        "action": action,
+        "target_path": target_path,
+        "source_extract": raw_record["rel_path"],
+        "source_sha256": raw_record["sha256"],
+        "status": "pending-review",
+        "related": [record["id"] for _, _, record in related],
+        "created_at": now_iso(),
+    }
+    body = (
+        f"# {'更新' if action == 'update' else '新增'}建议：{raw_record['title']}\n\n"
+        "## 为什么建议处理\n\n"
+        + (
+            f"- 源摘录 `{raw_record['rel_path']}` 的哈希不同于现有 vault 卡, 建议更新 `{target_path}`。\n"
+            if action == "update"
+            else f"- 源摘录 `{raw_record['rel_path']}` 还没有对应 vault 卡, 建议新增 `{target_path}`。\n"
+        )
+        + "- 此 proposal 只生成草案, 不会自动修改正式知识库。\n"
+        + "- warning: 请人工复核来源摘录和关联关系后再 apply。\n\n"
+        "## 候选关联\n\n"
+        + (
+            "\n".join(f"- `{record['id']}`: {record['title']} (`{record['rel_path']}`), overlap={', '.join(overlap[:6])}" for _, overlap, record in related)
+            if related
+            else "- 未找到高置信候选关联。"
+        )
+        + "\n\n## 建议写入内容\n\n"
+        "<!-- BEGIN_PROPOSED_MARKDOWN -->\n"
+        f"{proposed}"
+        "<!-- END_PROPOSED_MARKDOWN -->\n"
+    )
+    write_text(proposal_path, emit_frontmatter(meta) + body)
+    return True, proposal_path
+
+
+def write_link_proposal(left, right, score, overlap, force=False):
+    proposal_id, proposal_path = proposal_path_for("link", f"{left['id']}->{right['id']}")
+    if proposal_path.exists() and not force:
+        return False, proposal_path
+    meta = {
+        "id": proposal_id,
+        "type": "link-proposal",
+        "action": "link",
+        "target_path": left["rel_path"],
+        "related_document_id": right["id"],
+        "related_path": right["rel_path"],
+        "status": "pending-review",
+        "created_at": now_iso(),
+    }
+    body = (
+        f"# 关联建议：{left['title']} -> {right['title']}\n\n"
+        "## 为什么建议关联\n\n"
+        f"- 规则匹配分数: {score}\n"
+        f"- 重叠关键词: {', '.join(overlap) if overlap else '标题或主题相近'}\n"
+        f"- 目标卡: `{left['rel_path']}`\n"
+        f"- 关联卡: `{right['rel_path']}`\n\n"
+        "## 建议修改\n\n"
+        f"- 在 `{left['rel_path']}` frontmatter 的 `related` 中加入 `{right['id']}`。\n"
+        "- 在正文追加或更新 `## 关联知识` 小节。\n\n"
+        "## 审核提示\n\n"
+        "- warning: 这是规则生成的候选关系, 请人工确认不是误关联。\n"
+    )
+    write_text(proposal_path, emit_frontmatter(meta) + body)
+    return True, proposal_path
+
+
 def cmd_distill(args):
     ensure_dirs()
     created = 0
@@ -2004,6 +2260,158 @@ def cmd_propose(args):
     print(f"Created or updated {created} proposal(s); skipped {skipped} unchanged proposal(s).")
 
 
+def print_sync_plan(plan):
+    print("Sync plan")
+    print(f"  raw extracts: {len(plan['raw_records'])}")
+    print(f"  vault cards: {len(plan['vault_records'])}")
+    print(f"  new extracts: {len(plan['new_extracts'])}")
+    print(f"  changed extracts: {len(plan['changed_extracts'])}")
+    print(f"  unchanged extracts: {len(plan['unchanged_extracts'])}")
+    print(f"  stale vault cards: {len(plan['stale_vault_cards'])}")
+    if plan["new_extracts"]:
+        print("\nNew extracts:")
+        for record in plan["new_extracts"]:
+            print(f"  + {record['rel_path']} -> {record['target_path'].relative_to(ROOT)}")
+    if plan["changed_extracts"]:
+        print("\nChanged extracts:")
+        for record in plan["changed_extracts"]:
+            target = record.get("target_record")
+            target_path = target["rel_path"] if target else str(record["target_path"].relative_to(ROOT))
+            print(f"  * {record['rel_path']} -> {target_path}")
+    if plan["stale_vault_cards"]:
+        print("\nStale vault cards:")
+        for record in plan["stale_vault_cards"]:
+            warn(f"sync {record['rel_path']}: source extract is missing; review before keeping or deprecating")
+
+
+def cmd_sync(args):
+    ensure_dirs()
+    plan = sync_plan()
+    print_sync_plan(plan)
+    candidates = 0
+    for record in plan["new_extracts"] + plan["changed_extracts"]:
+        related = find_related_records(record, plan["vault_records"], limit=args.limit)
+        candidates += len(related)
+    print(f"\nPossible related cards: {candidates}")
+    print("Next: python kb.py update-proposals")
+
+
+def cmd_update_proposals(args):
+    ensure_dirs()
+    plan = sync_plan()
+    created = 0
+    skipped = 0
+    for record in plan["new_extracts"] + plan["changed_extracts"]:
+        related = find_related_records(record, plan["vault_records"], limit=args.limit)
+        did_create, path = write_update_proposal(record, related, force=args.force)
+        if did_create:
+            created += 1
+            print(f"Created {path.relative_to(ROOT)}")
+        else:
+            skipped += 1
+            print(f"Skipped existing {path.relative_to(ROOT)}")
+    print(f"Created {created} update proposal(s); skipped {skipped}.")
+    if plan["stale_vault_cards"]:
+        warn(f"{len(plan['stale_vault_cards'])} stale vault card(s) have missing source extracts; inspect `python kb.py sync` output.")
+
+
+def cmd_links(args):
+    ensure_dirs()
+    records = vault_records()
+    created = 0
+    skipped = 0
+    checked = 0
+    for idx, left in enumerate(records):
+        existing = existing_relation_ids(left)
+        for right in records[idx + 1 :]:
+            if right["id"] in existing:
+                continue
+            score, overlap = relation_score(left, right)
+            checked += 1
+            if score < args.min_score:
+                continue
+            did_create, path = write_link_proposal(left, right, score, overlap, force=args.force)
+            if did_create:
+                created += 1
+                print(f"Created {path.relative_to(ROOT)}")
+            else:
+                skipped += 1
+            if created >= args.limit:
+                print(f"Created {created} link proposal(s); checked {checked} pair(s); skipped {skipped}.")
+                return
+    print(f"Created {created} link proposal(s); checked {checked} pair(s); skipped {skipped}.")
+
+
+def extract_proposed_markdown(body):
+    start = "<!-- BEGIN_PROPOSED_MARKDOWN -->"
+    end = "<!-- END_PROPOSED_MARKDOWN -->"
+    start_idx = body.find(start)
+    end_idx = body.find(end)
+    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+        return ""
+    return body[start_idx + len(start) : end_idx].strip() + "\n"
+
+
+def append_relation_body(body, related_id, related_path):
+    entry = f"- related: `{related_id}` (`{related_path}`)"
+    if entry in body:
+        return body
+    if re.search(r"(?m)^## 关联知识\s*$", body):
+        return re.sub(r"(?m)^## 关联知识\s*$", f"## 关联知识\n\n{entry}", body, count=1)
+    return body.rstrip() + "\n\n## 关联知识\n\n" + entry + "\n"
+
+
+def apply_link_proposal(meta):
+    target = ROOT / str(meta.get("target_path") or "")
+    related_id = str(meta.get("related_document_id") or "").strip()
+    related_path = str(meta.get("related_path") or "").strip()
+    if not target.exists():
+        raise FileNotFoundError(f"Target vault card not found: {target}")
+    content = read_text(target)
+    target_meta, body = parse_markdown(content)
+    related = list_from_meta(target_meta, "related")
+    add_unique(related, related_id)
+    target_meta["related"] = related
+    target_meta["updated_at"] = now_iso()
+    body = append_relation_body(body, related_id, related_path)
+    write_text(target, emit_frontmatter(target_meta) + body)
+    return target
+
+
+def mark_proposal_applied(path, meta, body):
+    meta["status"] = "applied"
+    meta["applied_at"] = now_iso()
+    write_text(path, emit_frontmatter(meta) + body)
+
+
+def cmd_apply_proposal(args):
+    proposal_path = (ROOT / args.proposal).resolve() if not Path(args.proposal).is_absolute() else Path(args.proposal)
+    if not proposal_path.exists():
+        raise FileNotFoundError(f"Proposal not found: {proposal_path}")
+    content = read_text(proposal_path)
+    meta, body = parse_markdown(content)
+    action = str(meta.get("action") or "").strip()
+    if str(meta.get("status") or "") == "applied" and not args.force:
+        warn(f"proposal {proposal_path.relative_to(ROOT)} is already applied; use --force to reapply")
+        return
+    if action in {"add", "update"}:
+        target = ROOT / str(meta.get("target_path") or "")
+        proposed = extract_proposed_markdown(body)
+        if not proposed:
+            raise ValueError("Proposal does not contain BEGIN/END proposed Markdown markers.")
+        if target.exists() and action == "add" and not args.force:
+            raise FileExistsError(f"Target already exists: {target}")
+        write_text(target, proposed)
+        mark_proposal_applied(proposal_path, meta, body)
+        print(f"Applied {action} proposal -> {target.relative_to(ROOT)}")
+    elif action == "link":
+        target = apply_link_proposal(meta)
+        mark_proposal_applied(proposal_path, meta, body)
+        print(f"Applied link proposal -> {target.relative_to(ROOT)}")
+    else:
+        raise ValueError(f"Unsupported proposal action: {action}")
+
+
 def cmd_demo(args):
     init_project(args)
     cmd_ingest(argparse.Namespace(source=str(SAMPLE_CSV)))
@@ -2047,6 +2455,26 @@ def build_parser():
 
     propose_cmd = sub.add_parser("propose", help="Generate review-only proposal Markdown files.")
     propose_cmd.set_defaults(func=cmd_propose)
+
+    sync_cmd = sub.add_parser("sync", help="Compare raw extracts with vault cards and report incremental changes.")
+    sync_cmd.add_argument("--limit", type=int, default=5, help="Max related candidates to count per changed/new extract.")
+    sync_cmd.set_defaults(func=cmd_sync)
+
+    update_cmd = sub.add_parser("update-proposals", help="Generate add/update proposals from new or changed raw extracts.")
+    update_cmd.add_argument("--limit", type=int, default=5, help="Max related vault cards to include per proposal.")
+    update_cmd.add_argument("--force", action="store_true", help="Overwrite existing update proposal files.")
+    update_cmd.set_defaults(func=cmd_update_proposals)
+
+    links_cmd = sub.add_parser("links", help="Generate relationship proposals between existing vault cards.")
+    links_cmd.add_argument("--limit", type=int, default=20, help="Max link proposals to create.")
+    links_cmd.add_argument("--min-score", type=int, default=5, help="Minimum rule score needed to propose a link.")
+    links_cmd.add_argument("--force", action="store_true", help="Overwrite existing link proposal files.")
+    links_cmd.set_defaults(func=cmd_links)
+
+    apply_cmd = sub.add_parser("apply-proposal", help="Apply one reviewed add/update/link proposal to vault.")
+    apply_cmd.add_argument("proposal", help="Path to a proposal Markdown file.")
+    apply_cmd.add_argument("--force", action="store_true", help="Reapply or overwrite when the target already exists.")
+    apply_cmd.set_defaults(func=cmd_apply_proposal)
 
     distill_cmd = sub.add_parser("distill", help="Generate distilled knowledge cards from raw extract Markdown.")
     distill_cmd.add_argument("--force", action="store_true", help="Regenerate cards even when source extracts are unchanged.")

@@ -51,7 +51,9 @@ python kb.py ingest data/sample_experiments.csv
 - Never put raw PDFs, PPTs, Word files, or Excel files directly into `vault/`.
 - Keep real raw files under `raw/experiments/`, `raw/literature/`, or `raw/reports/`.
 - The output should land under `raw/extracts/<kind>/`.
-- After extraction, run `python kb.py distill --force` and `python kb.py index`.
+- After extraction, run `python kb.py sync` to see whether the extract is new or changed.
+- For reviewed vault updates, prefer `python kb.py update-proposals` and `python kb.py apply-proposal <proposal>` over direct edits.
+- For a full rebuild workflow, run `python kb.py distill --force` and `python kb.py index`.
 - If extraction is weak or empty, leave the generated `.extract.md` in place and manually improve its `## 提取文本` section.
 - Any fallback extraction must surface a `warning:` line in CLI output and preserve the warning in the generated `.extract.md`.
 - For PDFs, always review custom-font spacing, headers, footers, ads, and scanned pages before distillation.

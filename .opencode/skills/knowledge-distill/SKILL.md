@@ -74,6 +74,9 @@ For lithium battery research, always preserve exact source-backed details when p
 
 ```powershell
 python kb.py distill --force
+python kb.py sync
+python kb.py update-proposals
+python kb.py links
 python kb.py index
 python kb.py search "关键词"
 ```
@@ -83,6 +86,16 @@ python kb.py search "关键词"
 - Distill only from `raw/extracts/**/*.extract.md`.
 - Keep `vault/` structured and concise; do not copy entire raw extracts into `vault/`.
 - Every distilled card must keep source metadata in frontmatter.
+- For incremental evolution, generate add/update/link proposals first; do not silently modify reviewed vault cards.
+- Use `python kb.py apply-proposal <proposal>` only after human review.
 - If local AI is configured through `LOCAL_OPENAI_BASE_URL`, let it fill templates, but do not accept unsupported claims.
 - If local AI is not configured, use the deterministic Python fallback and then refine manually.
 - Any deterministic fallback, heuristic proposal, or placeholder generation must surface a `warning:` line in CLI output.
+
+## Incremental Proposal Types
+
+- `PROP-ADD-*`: create a new vault card from a new extract.
+- `PROP-UPDATE-*`: update an existing vault card when the source extract hash changed.
+- `PROP-LINK-*`: add a relationship between existing vault cards.
+
+Only `related` is proposed automatically in the first version. Stronger relations such as `supports`, `contradicts`, and `supersedes` require human judgment.

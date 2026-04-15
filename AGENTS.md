@@ -24,6 +24,8 @@ vault/                Structured knowledge cards only
 4. Run `python kb.py distill --force`.
 5. Run `python kb.py index`.
 6. Verify with `python kb.py search "<keyword>"`.
+7. For vault evolution, run `python kb.py sync`, then `python kb.py update-proposals` or `python kb.py links`.
+8. Apply only reviewed proposals with `python kb.py apply-proposal <proposal>`.
 
 CSV/JSON experiment exports can use:
 
@@ -38,6 +40,8 @@ python kb.py ingest data/sample_experiments.csv
 - Do not invent facts during distillation.
 - Keep source paths and hashes in frontmatter for traceability.
 - For lithium battery materials, preserve exact source-backed cell chemistry, electrode/electrolyte/separator details, process window, test protocol, performance metrics, and failure-mechanism clues.
+- Do not directly edit formal vault cards for incremental evolution unless applying a reviewed proposal.
+- New/update/link proposals must stay in `vault/proposals/` until reviewed.
 - `index/kb.sqlite` is a rebuildable cache.
 
 ## OpenCode
