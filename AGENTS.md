@@ -44,11 +44,28 @@ python kb.py ingest data/sample_experiments.csv
 - New/update/link proposals must stay in `vault/proposals/` until reviewed.
 - `index/kb.sqlite` is a rebuildable cache.
 
-## OpenCode
+## OpenCode Agent Architecture
 
-Use the project agent `kb-curator`.
+Use `kb-orchestrator` as the primary project agent for multi-step work.
+
+Specialist agents:
+
+- `kb-raw-intake`: raw file extraction, CSV/JSON ingest, extract warnings.
+- `kb-distiller`: add/update proposals and lithium-battery distillation quality.
+- `kb-linker`: candidate relationships between vault cards.
+- `kb-auditor`: provenance, warning, proposal, and final verification checks.
+- `kb-curator`: legacy all-in-one curator for simple single-agent sessions.
 
 Project skills:
 
 - `raw-extract`: convert raw files into `.extract.md`.
 - `knowledge-distill`: convert extracts into structured `vault/` cards.
+- `vault-evolve`: manage `sync`, `update-proposals`, `links`, and `apply-proposal`.
+
+Coordinator pattern:
+
+1. `kb-orchestrator` scopes the task and chooses the specialist path.
+2. Specialists produce extracts, proposals, or audit findings.
+3. Formal vault changes wait in `vault/proposals/`.
+4. `apply-proposal` is used only after human review.
+5. `kb-auditor` verifies `python kb.py sync`, `python kb.py index`, and focused search output.

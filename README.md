@@ -43,11 +43,25 @@ python kb.py apply-proposal vault/proposals/PROP-xxx.md
 ```text
 opencode.json
 .opencode/agents/kb-curator.md
+.opencode/agents/kb-orchestrator.md
+.opencode/agents/kb-raw-intake.md
+.opencode/agents/kb-distiller.md
+.opencode/agents/kb-linker.md
+.opencode/agents/kb-auditor.md
 .opencode/skills/raw-extract/SKILL.md
 .opencode/skills/knowledge-distill/SKILL.md
+.opencode/skills/vault-evolve/SKILL.md
 ```
 
-建议在 OpenCode 中使用 `kb-curator` agent。它会遵守 raw/vault 分层规则: 原始文件只进 `raw/`, 摘录只进 `raw/extracts/`, 结构化知识卡才进 `vault/`。
+建议在 OpenCode 中使用 `kb-orchestrator` agent。它是主协调者, 负责把任务分给专职 agent:
+
+- `kb-raw-intake`: 原始文件抽取、CSV/JSON 导入、抽取 warning 检查
+- `kb-distiller`: 结构化蒸馏、锂电池模板、add/update proposal
+- `kb-linker`: 新旧知识关联、link proposal
+- `kb-auditor`: 来源、warning、proposal、索引和检索验证
+- `kb-curator`: 兼容保留的单 agent 模式, 适合简单任务
+
+这套结构参考了 Oh My OpenCode/OpenAgent 的“主协调者 + 专职 subagent”思路, 但压缩成适合本项目的 lite 架构。核心规则不变: 原始文件只进 `raw/`, 摘录只进 `raw/extracts/`, 正式结构化知识卡才进 `vault/`, 增量修改必须先进入 `vault/proposals/`。
 
 ## 本地 AI 配置
 

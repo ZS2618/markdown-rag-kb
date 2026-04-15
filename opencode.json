@@ -4,7 +4,8 @@
     "skill": {
       "*": "ask",
       "raw-extract": "allow",
-      "knowledge-distill": "allow"
+      "knowledge-distill": "allow",
+      "vault-evolve": "allow"
     }
   }
 }

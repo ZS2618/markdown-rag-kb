@@ -40,6 +40,36 @@ index/kb.sqlite       派生索引, 可以删除后重建
 
 原始文件不要直接进知识库。`vault/` 只放蒸馏并结构化后的 Markdown。`index/kb.sqlite` 只是缓存, 不要把它当事实源。
 
+## OpenCode Agent 怎么用
+
+本项目现在采用 lite 多 agent 架构。OpenCode 里优先选择:
+
+```text
+kb-orchestrator
+```
+
+它负责协调这些专职 agent:
+
+```text
+kb-raw-intake   原始文件抽取和 ingest
+kb-distiller    蒸馏和 add/update proposal
+kb-linker       新旧知识关系 proposal
+kb-auditor      来源、warning、索引和检索验证
+kb-curator      兼容保留的单 agent
+```
+
+日常说法可以很直接:
+
+```text
+用 kb-orchestrator 帮我把 raw/literature 下的新 PDF 走完 extract、sync 和 update-proposals, 不要 apply。
+```
+
+需要真正写入正式库时再明确说:
+
+```text
+审核这个 proposal, 如果没有问题, 用 apply-proposal 应用并重建索引。
+```
+
 ## 最常用的命令
 
 ```powershell
