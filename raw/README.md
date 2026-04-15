@@ -24,7 +24,7 @@ python kb.py extract raw/reports/weekly.pptx --kind report --title "小组汇报
 python kb.py extract raw/experiments/run.xlsx --kind experiment --title "实验记录"
 ```
 
-内置提取支持 `.pdf`、`.docx`、`.pptx`、`.xlsx` 和文本类文件。旧 `.doc`、`.ppt`、`.xls` 只能做可打印字符串兜底, 推荐先转换成现代 Office 格式。扫描版 PDF 需要公司允许的 OCR 或本地 AI。
+内置提取支持 `.pdf`、`.docx`、`.pptx`、`.xlsx` 和文本类文件。PDF 会尽量读取文本流、ToUnicode 字体映射和 Flate 压缩流, 但仍需人工复核自定义字体空格、页眉页脚、广告链接和扫描页。旧 `.doc`、`.ppt`、`.xls` 只能做可打印字符串兜底, 推荐先转换成现代 Office 格式。扫描版 PDF 需要公司允许的 OCR 或本地 AI。
 
 你也可以用公司允许的工具或本地 AI 把原始文件转成文本摘录, 放到:
 

@@ -13,7 +13,7 @@ Use this skill when raw materials need to become `.extract.md` files before dist
 
 Supported first-pass extraction:
 
-- PDF: best-effort text extraction from PDF strings and Flate streams.
+- PDF: best-effort text extraction from text streams, ToUnicode font maps, and Flate streams.
 - Word: `.docx` via ZIP/XML parsing.
 - PowerPoint: `.pptx` via ZIP/XML parsing.
 - Excel: `.xlsx` via ZIP/XML parsing.
@@ -54,3 +54,4 @@ python kb.py ingest data/sample_experiments.csv
 - After extraction, run `python kb.py distill --force` and `python kb.py index`.
 - If extraction is weak or empty, leave the generated `.extract.md` in place and manually improve its `## 提取文本` section.
 - Any fallback extraction must surface a `warning:` line in CLI output and preserve the warning in the generated `.extract.md`.
+- For PDFs, always review custom-font spacing, headers, footers, ads, and scanned pages before distillation.

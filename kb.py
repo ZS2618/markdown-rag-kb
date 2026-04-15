@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -274,48 +275,284 @@ def extract_xlsx_text(path):
     return clean_extracted_text("\n".join(rows))
 
 
-def decode_pdf_string(value):
-    value = value.replace(rb"\\(", b"(").replace(rb"\\)", b")").replace(rb"\\\\", b"\\")
-    for encoding in ("utf-16-be", "utf-8", "latin-1"):
+def pdf_text_quality(text):
+    compact = text.strip()
+    if not compact:
+        return -100
+    chars = [ch for ch in compact if not ch.isspace()]
+    if not chars:
+        return -100
+    letters = sum(1 for ch in chars if ch.isalpha())
+    digits = sum(1 for ch in chars if ch.isdigit())
+    cjk = sum(1 for ch in chars if "\u4e00" <= ch <= "\u9fff")
+    controls = sum(1 for ch in chars if unicodedata.category(ch)[0] == "C")
+    nonchars = sum(1 for ch in chars if ch in ("\ufffe", "\uffff", "\ufffd"))
+    weird = sum(1 for ch in chars if not (ch.isalnum() or ch in NOISE_ALLOWED_PUNCT))
+    value = letters * 2 + digits + cjk * 3
+    value -= controls * 8 + weird * 2 + nonchars * 40
+    if re.search(r"[A-Za-z]{3,}", compact):
+        value += 8
+    if re.search(r"[\u4e00-\u9fff]", compact):
+        value += 8
+    if len(chars) > 200:
+        value -= 20
+    return value
+
+
+def unescape_pdf_literal(value):
+    out = bytearray()
+    idx = 0
+    while idx < len(value):
+        byte = value[idx]
+        if byte != 0x5C:
+            out.append(byte)
+            idx += 1
+            continue
+        idx += 1
+        if idx >= len(value):
+            break
+        esc = value[idx]
+        idx += 1
+        escapes = {
+            ord("n"): ord("\n"),
+            ord("r"): ord("\r"),
+            ord("t"): ord("\t"),
+            ord("b"): ord("\b"),
+            ord("f"): ord("\f"),
+            ord("("): ord("("),
+            ord(")"): ord(")"),
+            ord("\\"): ord("\\"),
+        }
+        if esc in escapes:
+            out.append(escapes[esc])
+            continue
+        if ord("0") <= esc <= ord("7"):
+            octal = bytes([esc])
+            for _ in range(2):
+                if idx < len(value) and ord("0") <= value[idx] <= ord("7"):
+                    octal += bytes([value[idx]])
+                    idx += 1
+                else:
+                    break
+            out.append(int(octal, 8))
+            continue
+        if esc in (ord("\n"), ord("\r")):
+            if esc == ord("\r") and idx < len(value) and value[idx] == ord("\n"):
+                idx += 1
+            continue
+        out.append(esc)
+    return bytes(out)
+
+
+def decode_pdf_hex(value):
+    raw = re.sub(rb"\s+", b"", value)
+    if len(raw) % 2:
+        raw += b"0"
+    try:
+        return bytes.fromhex(raw.decode("ascii"))
+    except ValueError:
+        return b""
+
+
+def likely_utf16_bytes(value):
+    if value.startswith((b"\xfe\xff", b"\xff\xfe")):
+        return True
+    if len(value) < 4:
+        return False
+    sample = value[:200]
+    even_nulls = sum(1 for idx in range(0, len(sample), 2) if sample[idx] == 0)
+    odd_nulls = sum(1 for idx in range(1, len(sample), 2) if sample[idx] == 0)
+    slots = max(len(sample) // 2, 1)
+    return even_nulls / slots > 0.25 or odd_nulls / slots > 0.25
+
+
+def decode_with_cmap(value, cmap):
+    if not cmap:
+        return ""
+    max_len = max((len(key) for key in cmap), default=0)
+    if not max_len:
+        return ""
+    out = []
+    idx = 0
+    while idx < len(value):
+        matched = False
+        for size in range(max_len, 0, -1):
+            token = value[idx : idx + size]
+            if token in cmap:
+                out.append(cmap[token])
+                idx += size
+                matched = True
+                break
+        if matched:
+            continue
+        byte = value[idx]
+        if 32 <= byte <= 126:
+            out.append(chr(byte))
+        idx += 1
+    return "".join(out)
+
+
+def decode_pdf_string(value, cmap=None):
+    value = unescape_pdf_literal(value)
+    candidates = []
+    mapped = decode_with_cmap(value, cmap or {})
+    if mapped:
+        candidates.append(mapped)
+    encodings = []
+    if value.startswith((b"\xfe\xff", b"\xff\xfe")):
+        encodings.extend(("utf-16", "utf-16-be", "utf-16-le"))
+    elif likely_utf16_bytes(value):
+        encodings.extend(("utf-16-be", "utf-16-le"))
+    encodings.extend(("utf-8", "latin-1"))
+    for encoding in encodings:
         try:
             decoded = value.decode(encoding)
             if decoded.strip():
-                return decoded
+                candidates.append(decoded)
         except UnicodeDecodeError:
             continue
-    return ""
+    if not candidates:
+        return ""
+    best = max(candidates, key=pdf_text_quality)
+    return best if pdf_text_quality(best) > 0 else ""
 
 
-def extract_pdf_strings(data):
+def extract_pdf_strings(data, cmap=None):
     chunks = []
     for match in re.finditer(rb"\((?:\\.|[^\\)]){2,}\)", data, flags=re.DOTALL):
-        text = decode_pdf_string(match.group(0)[1:-1])
+        text = decode_pdf_string(match.group(0)[1:-1], cmap)
         if re.search(r"[\w\u4e00-\u9fff]", text):
             chunks.append(text)
     for match in re.finditer(rb"<([0-9A-Fa-f\s]{8,})>", data):
-        raw = re.sub(rb"\s+", b"", match.group(1))
-        try:
-            text = bytes.fromhex(raw.decode("ascii")).decode("utf-16-be", errors="ignore")
-        except ValueError:
-            text = ""
+        raw = decode_pdf_hex(match.group(1))
+        mapped = decode_with_cmap(raw, cmap or {})
+        candidates = [mapped] if mapped else []
+        encodings = ("utf-16-be", "utf-16-le", "utf-8", "latin-1") if likely_utf16_bytes(raw) else ("utf-8", "latin-1")
+        for encoding in encodings:
+            try:
+                candidates.append(raw.decode(encoding))
+            except UnicodeDecodeError:
+                pass
+        text = max(candidates, key=pdf_text_quality) if candidates else ""
         if re.search(r"[\w\u4e00-\u9fff]", text):
+            chunks.append(text)
+    return chunks
+
+
+def iter_pdf_objects(data):
+    pattern = rb"(\d+)\s+(\d+)\s+obj(.*?)endobj"
+    for match in re.finditer(pattern, data, flags=re.DOTALL):
+        obj_id = int(match.group(1))
+        body = match.group(3)
+        stream_match = re.search(rb"(.*?)stream\r?\n(.*?)\r?\nendstream", body, flags=re.DOTALL)
+        if stream_match:
+            yield obj_id, stream_match.group(1), stream_match.group(2)
+        else:
+            yield obj_id, body, None
+
+
+def decode_pdf_stream(dictionary, stream):
+    if stream is None:
+        return b""
+    if any(marker in dictionary for marker in (b"/DCTDecode", b"/JPXDecode", b"/JBIG2Decode", b"/CCITTFaxDecode")):
+        return b""
+    if b"/Subtype" in dictionary and b"/Image" in dictionary:
+        return b""
+    if b"/FlateDecode" not in dictionary:
+        return b""
+    stream = stream.strip(b"\r\n")
+    for payload in (stream, stream.strip()):
+        try:
+            return zlib.decompress(payload)
+        except zlib.error:
+            pass
+        for wbits in (15, -15):
+            try:
+                return zlib.decompress(payload, wbits)
+            except zlib.error:
+                pass
+    return b""
+
+
+def parse_cmap_text(data):
+    text = data.decode("latin-1", errors="ignore")
+    cmap = {}
+    for block in re.findall(r"beginbfchar(.*?)endbfchar", text, flags=re.DOTALL):
+        for src, dst in re.findall(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>", block):
+            src_bytes = decode_pdf_hex(src.encode("ascii"))
+            dst_bytes = decode_pdf_hex(dst.encode("ascii"))
+            if src_bytes and dst_bytes:
+                try:
+                    cmap[src_bytes] = dst_bytes.decode("utf-16-be")
+                except UnicodeDecodeError:
+                    pass
+    for start, end, first in re.findall(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>", text):
+        start_int = int(start, 16)
+        end_int = int(end, 16)
+        first_int = int(first, 16)
+        width = max(len(start), len(end)) // 2
+        for offset, code in enumerate(range(start_int, min(end_int, start_int + 512) + 1)):
+            src_bytes = code.to_bytes(width, "big")
+            try:
+                cmap[src_bytes] = chr(first_int + offset)
+            except ValueError:
+                pass
+    for start, end, array_body in re.findall(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>\s+\[(.*?)\]", text, flags=re.DOTALL):
+        start_int = int(start, 16)
+        width = len(start) // 2
+        for offset, dst in enumerate(re.findall(r"<([0-9A-Fa-f]+)>", array_body)):
+            src_bytes = (start_int + offset).to_bytes(width, "big")
+            dst_bytes = decode_pdf_hex(dst.encode("ascii"))
+            try:
+                cmap[src_bytes] = dst_bytes.decode("utf-16-be")
+            except UnicodeDecodeError:
+                pass
+    return cmap
+
+
+def extract_pdf_text_operands(data, cmap):
+    chunks = []
+    for match in re.finditer(rb"\[(.*?)\]\s*TJ", data, flags=re.DOTALL):
+        parts = extract_pdf_strings(match.group(1), cmap)
+        if parts:
+            chunks.append("".join(parts))
+    for match in re.finditer(rb"(\((?:\\.|[^\\)]){1,}\)|<[0-9A-Fa-f\s]{2,}>)\s*(?:Tj|'|\")", data, flags=re.DOTALL):
+        operand = match.group(1)
+        if operand.startswith(b"("):
+            text = decode_pdf_string(operand[1:-1], cmap)
+        else:
+            raw = decode_pdf_hex(operand[1:-1])
+            text = decode_with_cmap(raw, cmap) or decode_pdf_string(raw, cmap)
+        if text:
             chunks.append(text)
     return chunks
 
 
 def extract_pdf_text(path):
     data = path.read_bytes()
-    chunks = extract_pdf_strings(data)
-    for match in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, flags=re.DOTALL):
-        before = data[max(0, match.start() - 300) : match.start()]
-        stream = match.group(1)
-        if b"FlateDecode" in before:
-            try:
-                stream = zlib.decompress(stream)
-            except zlib.error:
-                continue
-        chunks.extend(extract_pdf_strings(stream))
-    return clean_extracted_text("\n".join(chunks))
+    decoded_streams = []
+    cmap = {}
+    non_stream = re.sub(rb"stream\r?\n.*?\r?\nendstream", b"", data, flags=re.DOTALL)
+    for obj_id, dictionary, stream in iter_pdf_objects(data):
+        decoded = decode_pdf_stream(dictionary, stream)
+        if not decoded:
+            continue
+        decoded_streams.append((dictionary, decoded))
+        if b"beginbfchar" in decoded or b"beginbfrange" in decoded:
+            cmap.update(parse_cmap_text(decoded))
+
+    chunks = extract_pdf_strings(non_stream, cmap)
+    for dictionary, stream in decoded_streams:
+        if b"beginbfchar" in stream or b"beginbfrange" in stream:
+            continue
+        if not any(token in stream for token in (b"BT", b"Tj", b"TJ", b"Tf", b"ET")):
+            continue
+        chunks.extend(extract_pdf_text_operands(stream, cmap))
+        chunks.extend(extract_pdf_strings(stream, cmap))
+
+    cleaned = clean_extracted_text("\n".join(chunks))
+    lines = list(meaningful_text_lines(cleaned, min_chars=4))
+    return clean_extracted_text("\n".join(lines))
 
 
 def extract_printable_strings(path, min_len=6):
@@ -336,7 +573,9 @@ def extract_raw_file_text(path):
         return extract_xlsx_text(path), []
     if suffix == ".pdf":
         text = extract_pdf_text(path)
-        warnings = ["PDF extraction is best-effort with Python stdlib; scanned PDFs need OCR outside this tool."]
+        warnings = [
+            "PDF extraction is best-effort with Python stdlib; review output for custom-font spacing, ads, headers, and scanned pages."
+        ]
         if len(text) < 80:
             warnings.append("PDF text extraction was weak; used printable-string fallback where possible.")
             text = text or extract_printable_strings(path)
@@ -443,16 +682,10 @@ def section_text(body, *names):
 
 
 def first_paragraph(text):
-    cleaned = [line.strip() for line in text.splitlines()]
     chunks = []
     current = []
-    for line in cleaned:
-        if not line:
-            if current:
-                chunks.append(" ".join(current).strip())
-                current = []
-            continue
-        if line.startswith("|") or line.startswith("- ") or line.startswith("* "):
+    for line in meaningful_text_lines(text):
+        if line.startswith("- ") or line.startswith("* ") or line.startswith("+ "):
             continue
         current.append(line)
     if current:
@@ -466,7 +699,7 @@ def bullet_list(text):
         stripped = line.strip()
         if stripped.startswith(("- ", "* ", "+ ")):
             item = stripped[2:].strip()
-            if item:
+            if item and not is_noise_line(item):
                 items.append(item)
     return items
 
@@ -476,6 +709,108 @@ def truncate_text(text, limit=180):
     if len(compact) <= limit:
         return compact
     return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
+NOISE_LINE_MARKERS = (
+    "xmp",
+    "itext",
+    "adobe",
+    "stream",
+    "endstream",
+    "endobj",
+    "obj",
+    "exif",
+    "icc_profile",
+    "photoshop",
+    "instanceid",
+    "bm_fig",
+    "bm_cr",
+    "xmlns",
+)
+
+NOISE_ALLOWED_PUNCT = set("-–—.,;:()[]{}<>/%+*#&_=/\\·•'\"“”‘’|~@$")
+
+
+def is_noise_line(line):
+    text = line.strip()
+    if not text:
+        return True
+    lower = text.lower()
+    if any(marker in lower for marker in NOISE_LINE_MARKERS):
+        return True
+    if any(marker in text for marker in ("\ufffe", "\uffff", "\ufffd")):
+        return True
+    if re.fullmatch(r"[\W_]+", text):
+        return True
+    if re.search(r"(.)\1{7,}", text):
+        return True
+    chars = [ch for ch in text if not ch.isspace()]
+    if len(chars) < 4:
+        return True
+    control = sum(1 for ch in chars if unicodedata.category(ch)[0] == "C")
+    if control / len(chars) > 0.1:
+        return True
+    non_word = sum(1 for ch in chars if not (ch.isalnum() or ch in NOISE_ALLOWED_PUNCT))
+    if non_word / len(chars) > 0.45:
+        return True
+    if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", text):
+        return True
+    return False
+
+
+def meaningful_text_lines(text, min_chars=12):
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip("|").strip()
+        if len(line) < min_chars or line.startswith("#"):
+            continue
+        if is_noise_line(line):
+            continue
+        yield re.sub(r"\s+", " ", line)
+
+
+def paragraph_candidates(text):
+    chunks = []
+    current = []
+    for line in meaningful_text_lines(clean_extracted_text(text), min_chars=8):
+        if not line:
+            if current:
+                chunks.append(" ".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        chunks.append(" ".join(current).strip())
+    return [chunk for chunk in chunks if len(chunk) >= 20]
+
+
+def best_paragraph(text):
+    candidates = paragraph_candidates(text)
+    if not candidates:
+        return ""
+
+    def score(paragraph):
+        lower = paragraph.lower()
+        value = min(len(paragraph), 500) / 20.0
+        if re.search(r"[.!?。！？]", paragraph):
+            value += 4
+        if len(paragraph.split()) > 12:
+            value += 2
+        if any(token in lower for token in ("this paper", "we propose", "we present", "we show", "method", "demonstrate", "introduce")):
+            value += 3
+        if any(marker in lower for marker in NOISE_LINE_MARKERS):
+            value -= 10
+        return value
+
+    return max(candidates, key=score)
+
+
+def pick_sentence(text, needles):
+    sentences = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s+", text) if part.strip()]
+    for sentence in sentences:
+        lower = sentence.lower()
+        if any(needle in lower for needle in needles):
+            return sentence
+    return sentences[0] if sentences else ""
 
 
 def doc_kind(meta, path):
@@ -526,11 +861,23 @@ def extract_experiment_atoms(meta, body):
 
 def extract_literature_atoms(meta, body):
     sections = extract_sections(body)
-    abstract = section_text(body, "摘要", "Abstract", "概述") or str(meta.get("summary") or "").strip()
+    abstract = section_text(body, "摘要", "Abstract", "概述") or str(meta.get("summary") or "").strip() or best_paragraph(body)
+    abstract = abstract.strip()
+    abstract_sentences = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s+", abstract) if part.strip()]
+    problem = section_text(body, "研究问题", "问题", "目的", "Objective")
+    method = section_text(body, "方法", "Method", "Approach")
+    findings = section_text(body, "结果", "结论", "Findings", "Results")
+    if abstract_sentences:
+        if not problem:
+            problem = pick_sentence(abstract, ("challenge", "question", "understand", "interpret", "analy", "aim"))
+        if not method:
+            method = pick_sentence(abstract, ("method", "we propose", "we present", "combine", "use", "measure", "model"))
+        if not findings:
+            findings = pick_sentence(abstract, ("show", "demonstrate", "find", "result", "conclude", "allow", "enable"))
     return {
-        "problem": section_text(body, "研究问题", "问题", "目的", "Objective"),
-        "method": section_text(body, "方法", "Method", "Approach"),
-        "findings": section_text(body, "结果", "结论", "Findings", "Results"),
+        "problem": problem,
+        "method": method,
+        "findings": findings,
         "limitations": section_text(body, "局限", "局限性", "Limitations"),
         "abstract": abstract or first_paragraph(body),
         "keywords": tags_from_value(meta.get("tags")) or bullet_list(sections.get("关键词", "")),
@@ -611,20 +958,14 @@ def extract_battery_atoms(meta, body):
 def matching_lines(body, terms, fallback, limit=6):
     seen = set()
     lines = []
-    for raw_line in clean_extracted_text(body).splitlines():
-        line = raw_line.strip().strip("|").strip()
-        if len(line) < 3:
-            continue
-        if line.startswith("#"):
-            continue
+    for line in meaningful_text_lines(clean_extracted_text(body)):
         lower = line.lower()
         if not any(term.lower() in lower for term in terms):
             continue
-        normalized = re.sub(r"\s+", " ", line)
-        if normalized in seen:
+        if line in seen:
             continue
-        seen.add(normalized)
-        lines.append(f"- {truncate_text(normalized, 180)}")
+        seen.add(line)
+        lines.append(f"- {truncate_text(line, 180)}")
         if len(lines) >= limit:
             break
     return "\n".join(lines) if lines else fallback

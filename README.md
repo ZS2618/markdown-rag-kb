@@ -89,7 +89,7 @@ JSON 支持对象数组：
 - `.docx`: 读取 Word ZIP/XML 文本
 - `.pptx`: 读取 PowerPoint ZIP/XML 幻灯片文本
 - `.xlsx`: 读取 Excel ZIP/XML 单元格文本
-- `.pdf`: 尽力读取 PDF 字符串和 Flate 压缩流; 扫描版 PDF 需要外部 OCR
+- `.pdf`: 尽力读取 PDF 文本流、ToUnicode 字体映射和 Flate 压缩流; 仍需人工复核自定义字体空格、页眉页脚、广告链接和扫描页
 - `.doc`、`.ppt`、`.xls`: 只能做可打印字符串兜底; 推荐先转成现代 Office 格式
 
 示例:
