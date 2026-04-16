@@ -11,10 +11,13 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -119,6 +122,33 @@ def read_text(path):
 def write_text(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def parse_env_line(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None, None
+    if stripped.startswith("export "):
+        stripped = stripped[len("export ") :].strip()
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return None, None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
+
+
+def load_project_env():
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return False
+    for line in read_text(env_path).splitlines():
+        key, value = parse_env_line(line)
+        if key and key not in os.environ:
+            os.environ[key] = value
+    return True
 
 
 def parse_scalar(value):
@@ -553,7 +583,7 @@ def extract_pdf_text_operands(data, cmap):
     return chunks
 
 
-def extract_pdf_text(path):
+def extract_pdf_text_stdlib(path):
     data = path.read_bytes()
     decoded_streams = []
     cmap = {}
@@ -582,6 +612,112 @@ def extract_pdf_text(path):
     return clean_extracted_text("\n".join(lines))
 
 
+def extract_pdf_text_pdfplumber(path):
+    import pdfplumber
+
+    pages = []
+    with pdfplumber.open(path) as pdf:
+        for idx, page in enumerate(pdf.pages, 1):
+            text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+            if text.strip():
+                pages.append(f"## Page {idx}\n\n{text.strip()}")
+    return clean_extracted_text("\n\n".join(pages))
+
+
+def extract_pdf_text_pdfminer(path):
+    from pdfminer.high_level import extract_text
+
+    return clean_extracted_text(extract_text(str(path)) or "")
+
+
+def extract_pdf_text_pypdf(path):
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    pages = []
+    for idx, page in enumerate(reader.pages, 1):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append(f"## Page {idx}\n\n{text.strip()}")
+    return clean_extracted_text("\n\n".join(pages))
+
+
+def extract_pdf_text_pdftotext(path):
+    executable = shutil.which("pdftotext")
+    if not executable:
+        raise RuntimeError("pdftotext command is not available on PATH.")
+    proc = subprocess.run(
+        [executable, "-layout", "-enc", "UTF-8", str(path), "-"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=int(os.environ.get("PDF_EXTRACT_TIMEOUT", "120")),
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "pdftotext failed").strip())
+    return clean_extracted_text(proc.stdout)
+
+
+def extract_pdf_text_command(path):
+    command = os.environ.get("PDF_EXTRACTOR_CMD", "").strip()
+    if not command:
+        raise RuntimeError("PDF_EXTRACTOR_CMD is not configured.")
+    command = command.replace("{input}", str(path))
+    proc = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=int(os.environ.get("PDF_EXTRACT_TIMEOUT", "300")),
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "PDF_EXTRACTOR_CMD failed").strip())
+    return clean_extracted_text(proc.stdout)
+
+
+def pdf_backend_candidates():
+    configured = os.environ.get("PDF_EXTRACTOR", "auto").strip().lower() or "auto"
+    if configured == "auto":
+        return ("pdfplumber", "pdfminer", "pypdf", "pdftotext")
+    return tuple(part.strip().lower() for part in configured.split(",") if part.strip())
+
+
+def extract_pdf_text(path):
+    loaders = {
+        "pdfplumber": extract_pdf_text_pdfplumber,
+        "pdfminer": extract_pdf_text_pdfminer,
+        "pypdf": extract_pdf_text_pypdf,
+        "pdftotext": extract_pdf_text_pdftotext,
+        "command": extract_pdf_text_command,
+        "stdlib": extract_pdf_text_stdlib,
+    }
+    errors = []
+    for name in pdf_backend_candidates():
+        loader = loaders.get(name)
+        if not loader:
+            errors.append(f"{name}: unknown PDF_EXTRACTOR backend")
+            continue
+        try:
+            text = loader(path)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            continue
+        if len(text) >= int(os.environ.get("PDF_MIN_TEXT_CHARS", "80")):
+            return text, name, errors
+        errors.append(f"{name}: extracted too little text ({len(text)} chars)")
+    detail = "; ".join(errors) if errors else "no PDF backend configured"
+    raise RuntimeError(
+        "PDF extraction failed or produced too little text. "
+        "Set PDF_EXTRACTOR=pdfplumber,pdfminer,pypdf,pdftotext,command or configure PDF_EXTRACTOR_CMD. "
+        f"Details: {detail}"
+    )
+
+
 def extract_printable_strings(path, min_len=6):
     data = path.read_bytes()
     text = data.decode("latin-1", errors="ignore")
@@ -599,15 +735,10 @@ def extract_raw_file_text(path):
     if suffix == ".xlsx":
         return extract_xlsx_text(path), []
     if suffix == ".pdf":
-        text = extract_pdf_text(path)
-        warnings = [
-            "PDF extraction is best-effort with Python stdlib; review output for custom-font spacing, ads, headers, and scanned pages."
-        ]
-        if len(text) < 80:
-            warnings.append("PDF text extraction was weak; used printable-string fallback where possible.")
-            text = text or extract_printable_strings(path)
-        if not text:
-            warnings.append("No text was extracted from this PDF; provide OCR text manually in the generated extract.")
+        text, backend, backend_errors = extract_pdf_text(path)
+        warnings = [f"PDF extracted with backend `{backend}`; review layout, equations, tables, and scanned pages before distillation."]
+        for item in backend_errors:
+            warnings.append(f"PDF backend skipped: {item}")
         return text, warnings
     if suffix in {".doc", ".ppt", ".xls"}:
         text = extract_printable_strings(path)
@@ -1314,6 +1445,20 @@ def init_db(con):
             status TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS embeddings (
+            chunk_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            title TEXT,
+            path TEXT,
+            text_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            vector_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
         """
     )
     con.commit()
@@ -1326,6 +1471,33 @@ def init_project(args):
     if not SAMPLE_CSV.exists():
         create_sample_data()
     create_sample_source_docs()
+    dot_env_example = ROOT / ".env.example"
+    if not dot_env_example.exists():
+        write_text(
+            dot_env_example,
+            (
+                "# Copy this file to .env and point it at your intranet services.\n"
+                "LOCAL_OPENAI_BASE_URL=http://127.0.0.1:8000/v1\n"
+                "LOCAL_OPENAI_API_KEY=\n"
+                "LOCAL_OPENAI_CHAT_MODEL=local-chat-model\n"
+                "\n"
+                "# Optional semantic retrieval. If omitted, `embed-index` and `semantic-search` will fail loudly.\n"
+                "LOCAL_OPENAI_EMBEDDING_MODEL=local-embedding-model\n"
+                "# LOCAL_EMBEDDING_BASE_URL=http://127.0.0.1:8000/v1\n"
+                "# LOCAL_EMBEDDING_API_KEY=\n"
+                "# LOCAL_EMBEDDING_CMD=python tools/embed_sentence_transformers.py\n"
+                "# LOCAL_EMBEDDING_CMD=python tools/embed_flagembedding_bgem3.py\n"
+                "# LOCAL_EMBEDDING_CMD=node tools/embed_transformersjs.mjs\n"
+                "# LOCAL_EMBEDDING_MODEL_PATH=models/bge-m3\n"
+                "LOCAL_EMBEDDING_LOCAL_FILES_ONLY=true\n"
+                "LOCAL_EMBEDDING_NORMALIZE=true\n"
+                "LOCAL_EMBEDDING_BATCH_SIZE=16\n"
+                "\n"
+                "# PDF extraction backends: auto, pdfplumber, pdfminer, pypdf, pdftotext, command, stdlib.\n"
+                "PDF_EXTRACTOR=auto\n"
+                "# PDF_EXTRACTOR_CMD=python tools/pdf_to_text.py {input}\n"
+            ),
+        )
     env_example = ROOT / "local_ai.env.example"
     if not env_example.exists():
         write_text(
@@ -1335,6 +1507,8 @@ def init_project(args):
                 '# $env:LOCAL_OPENAI_BASE_URL="http://127.0.0.1:8000/v1"\n'
                 '# $env:LOCAL_OPENAI_API_KEY="local-key-if-required"\n'
                 '# $env:LOCAL_OPENAI_CHAT_MODEL="local-model-name"\n'
+                '# $env:LOCAL_OPENAI_EMBEDDING_MODEL="local-embedding-model"\n'
+                '# $env:PDF_EXTRACTOR="auto"\n'
             ),
         )
     print(f"Initialized knowledge base at {ROOT}")
@@ -1559,6 +1733,7 @@ def index_documents(args):
     with connect_db() as con:
         init_db(con)
         con.execute("DELETE FROM chunks_fts")
+        con.execute("DELETE FROM embeddings")
         con.execute("DELETE FROM chunks")
         con.execute("DELETE FROM documents")
         indexed = 0
@@ -1770,6 +1945,218 @@ def chat_completion(messages, temperature=0.1):
         return None, "Local AI response did not match OpenAI-compatible chat format."
 
 
+def require_chat_completion(messages, temperature=0.1):
+    answer, error = chat_completion(messages, temperature=temperature)
+    if not answer:
+        raise RuntimeError(
+            "AI is required for this command and no fallback is allowed. "
+            f"Configure project .env or environment variables. Details: {error}"
+        )
+    return answer
+
+
+def embedding_config():
+    return {
+        "base_url": (os.environ.get("LOCAL_EMBEDDING_BASE_URL") or os.environ.get("LOCAL_OPENAI_BASE_URL", "")).rstrip("/"),
+        "api_key": os.environ.get("LOCAL_EMBEDDING_API_KEY", os.environ.get("LOCAL_OPENAI_API_KEY", "")),
+        "model": os.environ.get("LOCAL_OPENAI_EMBEDDING_MODEL", "").strip(),
+        "cmd": os.environ.get("LOCAL_EMBEDDING_CMD", "").strip(),
+        "batch_size": max(1, int(os.environ.get("LOCAL_EMBEDDING_BATCH_SIZE", "16"))),
+    }
+
+
+def normalize_embedding(value):
+    if not isinstance(value, list) or not value:
+        raise ValueError("embedding vector is empty or not a list")
+    return [float(item) for item in value]
+
+
+def embeddings_from_command(texts, config):
+    proc = subprocess.run(
+        config["cmd"],
+        input=json.dumps({"input": texts}, ensure_ascii=False),
+        shell=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=int(os.environ.get("LOCAL_EMBEDDING_TIMEOUT", "300")),
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "LOCAL_EMBEDDING_CMD failed").strip())
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"LOCAL_EMBEDDING_CMD returned invalid JSON: {exc}") from exc
+    if isinstance(payload, list):
+        return [normalize_embedding(item) for item in payload]
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise RuntimeError("LOCAL_EMBEDDING_CMD must return a list of vectors or {data:[{embedding:[...]}]}.")
+    vectors = []
+    for item in data:
+        vector = item.get("embedding") if isinstance(item, dict) else item
+        vectors.append(normalize_embedding(vector))
+    return vectors
+
+
+def embeddings_from_openai(texts, config):
+    if not config["base_url"]:
+        raise RuntimeError("LOCAL_OPENAI_BASE_URL or LOCAL_EMBEDDING_BASE_URL is not configured.")
+    if not config["model"]:
+        raise RuntimeError("LOCAL_OPENAI_EMBEDDING_MODEL is not configured.")
+    url = config["base_url"]
+    if not url.endswith("/embeddings"):
+        url = url + "/embeddings"
+    payload = json.dumps({"model": config["model"], "input": texts}, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if config["api_key"]:
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("LOCAL_EMBEDDING_TIMEOUT", "300"))) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Local embedding request failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Local embedding returned invalid JSON: {exc}") from exc
+    try:
+        rows = sorted(data["data"], key=lambda item: item.get("index", 0))
+        return [normalize_embedding(item["embedding"]) for item in rows]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Local embedding response did not match OpenAI-compatible format.") from exc
+
+
+def embed_texts(texts):
+    config = embedding_config()
+    if config["cmd"]:
+        vectors = embeddings_from_command(texts, config)
+        model_name = config["cmd"]
+    else:
+        vectors = embeddings_from_openai(texts, config)
+        model_name = config["model"]
+    if len(vectors) != len(texts):
+        raise RuntimeError(f"Embedding service returned {len(vectors)} vectors for {len(texts)} input texts.")
+    dims = {len(vector) for vector in vectors}
+    if len(dims) != 1:
+        raise RuntimeError("Embedding service returned vectors with inconsistent dimensions.")
+    return vectors, model_name
+
+
+def cosine_similarity(left, right):
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def chunk_rows_for_embedding(con):
+    return con.execute(
+        """
+        SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.text, d.title, d.path
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        ORDER BY d.path, c.chunk_index
+        """
+    ).fetchall()
+
+
+def cmd_embed_index(args):
+    with connect_db() as con:
+        init_db(con)
+        rows = chunk_rows_for_embedding(con)
+        if not rows:
+            raise RuntimeError("No chunks found. Run `python kb.py index` first.")
+        config = embedding_config()
+        model_key = config["cmd"] or config["model"]
+        if not model_key:
+            raise RuntimeError("Embedding is required: configure LOCAL_OPENAI_EMBEDDING_MODEL or LOCAL_EMBEDDING_CMD in .env.")
+        pending = []
+        for row in rows:
+            text_sha = sha256_bytes(row["text"].encode("utf-8"))
+            old = con.execute(
+                "SELECT text_sha256, model FROM embeddings WHERE chunk_id = ?",
+                (row["chunk_id"],),
+            ).fetchone()
+            if old and old["text_sha256"] == text_sha and old["model"] == model_key and not args.force:
+                continue
+            pending.append((row, text_sha))
+        if not pending:
+            print("Embedding index is already up to date.")
+            return
+        batch_size = config["batch_size"]
+        done = 0
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start : start + batch_size]
+            vectors, model_name = embed_texts([row["text"] for row, _ in batch])
+            for (row, text_sha), vector in zip(batch, vectors):
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO embeddings
+                    (chunk_id, document_id, chunk_index, title, path, text_sha256, model, dim, vector_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["chunk_id"],
+                        row["document_id"],
+                        row["chunk_index"],
+                        row["title"],
+                        row["path"],
+                        text_sha,
+                        model_name,
+                        len(vector),
+                        json.dumps(vector, separators=(",", ":")),
+                        now_iso(),
+                    ),
+                )
+            con.commit()
+            done += len(batch)
+            print(f"Embedded {done}/{len(pending)} chunk(s).")
+
+
+def semantic_search(query, limit=5):
+    query_vectors, model_name = embed_texts([query])
+    query_vector = query_vectors[0]
+    with connect_db() as con:
+        init_db(con)
+        rows = con.execute(
+            """
+            SELECT e.chunk_id, e.document_id, e.chunk_index, e.title, e.path, e.vector_json, c.text
+            FROM embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            WHERE e.model = ?
+            """,
+            (model_name,),
+        ).fetchall()
+    if not rows:
+        raise RuntimeError(f"No embeddings found for model `{model_name}`. Run `python kb.py embed-index` first.")
+    ranked = []
+    for row in rows:
+        vector = json.loads(row["vector_json"])
+        score = cosine_similarity(query_vector, vector)
+        item = dict(row)
+        item["rank"] = -score
+        item["_semantic_score"] = score
+        ranked.append(item)
+    ranked.sort(key=lambda row: (-row["_semantic_score"], row["path"], row["chunk_index"]))
+    return ranked[:limit]
+
+
+def cmd_semantic_search(args):
+    results = semantic_search(args.query, args.limit)
+    if not results:
+        print("No semantic results found.")
+        return
+    for idx, row in enumerate(results, 1):
+        print(f"[{idx}] {row['title']}  score={row['_semantic_score']:.4f}")
+        print(f"    path: {row['path']}")
+        print(f"    chunk: {row['chunk_index']}")
+        print(f"    snippet: {short_snippet(row['text'], args.query)}")
+
+
 def context_from_results(results):
     parts = []
     for idx, row in enumerate(results, 1):
@@ -1786,9 +2173,24 @@ def context_from_results(results):
 def cmd_ask(args):
     results = search_chunks(args.query, args.limit)
     if not results:
-        print("No local context found. Try importing documents and running: python kb.py index")
+        answer = require_chat_completion(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是公司内网离线知识库助手。用户没有可用检索片段时，必须明确说资料不足，"
+                        "并建议补充 raw/extract/vault 或重建索引。不要编造事实。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"问题：{args.query}\n\n检索片段：无\n\n请用中文回答。",
+                },
+            ]
+        )
+        print(answer)
         return
-    answer, error = chat_completion(
+    answer = require_chat_completion(
         [
             {
                 "role": "system",
@@ -1809,11 +2211,6 @@ def cmd_ask(args):
             },
         ]
     )
-    if error:
-        warn(f"ask used local retrieval fallback because AI was not used: {error}")
-        print("\nLocal retrieval results:")
-        print_results(args.query, results)
-        return
     fallback_warnings = sorted({row.get("_fallback_warning") for row in results if row.get("_fallback_warning")})
     for item in fallback_warnings:
         warn(item)
@@ -1874,10 +2271,7 @@ def distillation_prompt(kind, title, meta, body, source_path):
 
 
 def ai_distillation(kind, title, meta, body, source_path):
-    answer, error = chat_completion(distillation_prompt(kind, title, meta, body, source_path), temperature=0.2)
-    if answer:
-        return answer, None
-    return None, error
+    return require_chat_completion(distillation_prompt(kind, title, meta, body, source_path), temperature=0.2)
 
 
 def save_distillation(source_doc, kind, body):
@@ -2023,7 +2417,8 @@ def relation_section(related):
 
 def proposed_distilled_markdown(raw_record, related):
     source_doc = raw_record["source_doc"]
-    body, kind = generate_distillation(raw_record["meta"], raw_record["body"], raw_record["path"], raw_record["rel_path"])
+    kind = raw_record["kind"]
+    body = ai_distillation(kind, raw_record["title"], raw_record["meta"], raw_record["body"], raw_record["rel_path"])
     target = raw_record.get("target_record")
     meta = distill_target_meta(source_doc, raw_record["sha256"], kind)
     if target:
@@ -2152,13 +2547,7 @@ def cmd_distill(args):
                 old_meta, _ = parse_markdown(read_text(target))
                 if old_meta.get("source_sha256") == source_doc["sha256"] and not getattr(args, "force", False):
                     continue
-            distilled_body = None
-            ai_body, ai_error = ai_distillation(kind, title, meta, body, rel_path)
-            if ai_body:
-                distilled_body = ai_body
-            else:
-                warn(f"distill {rel_path}: used deterministic Python fallback because local AI was not used: {ai_error}")
-                distilled_body, _ = generate_distillation(meta, body, path, rel_path)
+            distilled_body = ai_distillation(kind, title, meta, body, rel_path)
             if target_exists:
                 updated += 1
             else:
@@ -2168,31 +2557,8 @@ def cmd_distill(args):
     print(f"Created {created} distilled note(s); updated {updated} distilled note(s).")
 
 
-def heuristic_proposal(meta, body, title, path):
-    tags = tags_from_value(meta.get("tags"))
-    missing = []
-    for field in ("summary", "conclusion"):
-        if field == "summary" and "## 摘要" not in body:
-            missing.append("缺少“摘要”章节")
-        if field == "conclusion" and "## 结论" not in body:
-            missing.append("缺少“结论”章节")
-    possible_tags = ", ".join(tags) if tags else "待 AI 或人工补充"
-    return (
-        f"# 待审核建议：{title}\n\n"
-        "## 建议摘要\n\n"
-        f"请审核并完善文档 `{path}`。当前系统在无 AI 配置时只能生成结构化检查建议。\n\n"
-        "## 可能标签\n\n"
-        f"{possible_tags}\n\n"
-        "## 冲突/缺失信息提示\n\n"
-        + ("\n".join(f"- {item}" for item in missing) if missing else "- 未发现明显结构缺失。")
-        + "\n\n"
-        "## 引用来源\n\n"
-        f"- {path}\n"
-    )
-
-
 def ai_proposal(meta, body, title, path):
-    answer, error = chat_completion(
+    return require_chat_completion(
         [
             {
                 "role": "system",
@@ -2209,9 +2575,6 @@ def ai_proposal(meta, body, title, path):
         ],
         temperature=0.2,
     )
-    if answer:
-        return answer, None
-    return heuristic_proposal(meta, body, title, path) + f"\n\n_AI 未使用原因：{error}_\n", error
 
 
 def cmd_propose(args):
@@ -2244,9 +2607,7 @@ def cmd_propose(args):
                 "status": "pending-review",
                 "updated_at": now_iso(),
             }
-            proposal_body, ai_error = ai_proposal(meta, body, title, rel_path)
-            if ai_error:
-                warn(f"propose {rel_path}: used heuristic fallback because local AI was not used: {ai_error}")
+            proposal_body = ai_proposal(meta, body, title, rel_path)
             write_text(proposal_path, emit_frontmatter(proposal_meta) + proposal_body)
             con.execute(
                 """
@@ -2448,7 +2809,16 @@ def build_parser():
     search_cmd.add_argument("--limit", type=int, default=5)
     search_cmd.set_defaults(func=cmd_search)
 
-    ask_cmd = sub.add_parser("ask", help="Answer with retrieved context and optional local AI.")
+    embed_cmd = sub.add_parser("embed-index", help="Build or refresh semantic embeddings for indexed chunks.")
+    embed_cmd.add_argument("--force", action="store_true", help="Regenerate embeddings even when chunk text is unchanged.")
+    embed_cmd.set_defaults(func=cmd_embed_index)
+
+    semantic_cmd = sub.add_parser("semantic-search", help="Search with local embeddings.")
+    semantic_cmd.add_argument("query")
+    semantic_cmd.add_argument("--limit", type=int, default=5)
+    semantic_cmd.set_defaults(func=cmd_semantic_search)
+
+    ask_cmd = sub.add_parser("ask", help="Answer with retrieved context and required local AI.")
     ask_cmd.add_argument("query")
     ask_cmd.add_argument("--limit", type=int, default=5)
     ask_cmd.set_defaults(func=cmd_ask)
@@ -2487,6 +2857,7 @@ def build_parser():
 
 
 def main(argv=None):
+    load_project_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

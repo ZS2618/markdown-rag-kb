@@ -1,6 +1,6 @@
 ---
 name: raw-extract
-description: Convert raw PDF, Word, PowerPoint, Excel, CSV, JSON, or text-like source files into raw/extracts/*.extract.md files using only the repository's Python standard-library tooling.
+description: Convert raw PDF, Word, PowerPoint, Excel, CSV, JSON, or text-like source files into raw/extracts/*.extract.md files using repository tooling and approved local extractors.
 compatibility: opencode
 metadata:
   project: markdown-rag-kb
@@ -13,7 +13,7 @@ Use this skill when raw materials need to become `.extract.md` files before dist
 
 Supported first-pass extraction:
 
-- PDF: best-effort text extraction from text streams, ToUnicode font maps, and Flate streams.
+- PDF: `PDF_EXTRACTOR=auto` tries `pdfplumber`, `pdfminer`, `pypdf`, then `pdftotext`; `PDF_EXTRACTOR=command` can call Docling, Marker, OCR, or an approved company converter.
 - Word: `.docx` via ZIP/XML parsing.
 - PowerPoint: `.pptx` via ZIP/XML parsing.
 - Excel: `.xlsx` via ZIP/XML parsing.
@@ -54,6 +54,6 @@ python kb.py ingest data/sample_experiments.csv
 - After extraction, run `python kb.py sync` to see whether the extract is new or changed.
 - For reviewed vault updates, prefer `python kb.py update-proposals` and `python kb.py apply-proposal <proposal>` over direct edits.
 - For a full rebuild workflow, run `python kb.py distill --force` and `python kb.py index`.
-- If extraction is weak or empty, leave the generated `.extract.md` in place and manually improve its `## 提取文本` section.
+- If PDF extraction fails or is too short, the command should stop instead of writing likely-garbled text; fix the extractor or use an approved OCR/conversion command.
 - Any fallback extraction must surface a `warning:` line in CLI output and preserve the warning in the generated `.extract.md`.
 - For PDFs, always review custom-font spacing, headers, footers, ads, and scanned pages before distillation.

@@ -88,9 +88,9 @@ python kb.py search "关键词"
 - Every distilled card must keep source metadata in frontmatter.
 - For incremental evolution, generate add/update/link proposals first; do not silently modify reviewed vault cards.
 - Use `python kb.py apply-proposal <proposal>` only after human review.
-- If local AI is configured through `LOCAL_OPENAI_BASE_URL`, let it fill templates, but do not accept unsupported claims.
-- If local AI is not configured, use the deterministic Python fallback and then refine manually.
-- Any deterministic fallback, heuristic proposal, or placeholder generation must surface a `warning:` line in CLI output.
+- Local AI configured through project `.env` or `LOCAL_OPENAI_BASE_URL` is mandatory for distillation and content proposals.
+- If local AI is not configured or is unreachable, stop and report the configuration error; do not use deterministic fallback content.
+- Any remaining weak non-AI path, such as extract warnings or missing CSV fields, must surface a `warning:` line in CLI output.
 
 ## Incremental Proposal Types
 

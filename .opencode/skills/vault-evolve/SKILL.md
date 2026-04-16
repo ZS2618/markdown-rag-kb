@@ -14,7 +14,7 @@ Use this skill when knowledge has to evolve after new or changed extracts arrive
 This skill protects the formal knowledge base:
 
 - `sync` diagnoses state.
-- `update-proposals` creates add/update drafts.
+- `update-proposals` creates AI-generated add/update drafts.
 - `links` creates relationship drafts.
 - `apply-proposal` writes reviewed proposals into `vault/`.
 
@@ -40,9 +40,11 @@ python kb.py index
 - Source SHA256 is present for add/update proposals.
 - `warning:` messages are not hidden.
 - Proposed content is inside `BEGIN_PROPOSED_MARKDOWN` / `END_PROPOSED_MARKDOWN`.
+- Add/update proposed content was generated with local AI, not deterministic fallback text.
 - `related` links are plausible and source-backed.
 - `supports`, `contradicts`, and `supersedes` are only added by human judgment.
 - After applying, run `python kb.py index` and one focused `python kb.py search`.
+- If semantic retrieval is configured, run `python kb.py embed-index` after `index`.
 
 ## Rules
 
@@ -50,3 +52,5 @@ python kb.py index
 - Do not silently edit reviewed vault cards outside the proposal flow.
 - Do not treat SQLite as source of truth.
 - Do not invent relations beyond the available source text.
+- Stop if `.env`/local AI is not configured for content proposals.
+- If no embedding API exists, use `LOCAL_EMBEDDING_CMD` with `tools/embed_flagembedding_bgem3.py`, `tools/embed_sentence_transformers.py`, or `tools/embed_transformersjs.mjs`.

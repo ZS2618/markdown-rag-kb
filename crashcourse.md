@@ -4,9 +4,11 @@
 
 ## 先跑起来
 
-在项目目录里打开 PowerShell, 先跑 demo:
+在项目目录里打开 PowerShell, 先把 `.env.example` 复制成 `.env`, 填入公司内网 AI:
 
 ```powershell
+copy .env.example .env
+notepad .env
 python kb.py demo
 ```
 
@@ -18,7 +20,7 @@ python kb.py demo
 4. 重建 SQLite FTS5 索引
 5. 做一次“催化剂”搜索, 让你看到结果长什么样
 
-如果这一步成功, 说明你的环境已经可以用了。
+如果这一步成功, 说明本地 AI、蒸馏、索引和检索都跑通了。没有 AI 配置时, `demo` 会失败, 这是现在的预期行为。
 
 ## 你会看到什么
 
@@ -77,7 +79,9 @@ python kb.py init
 python kb.py extract raw/literature/example.pdf --kind literature --title "文献标题"
 python kb.py ingest data/sample_experiments.csv
 python kb.py index
+python kb.py embed-index
 python kb.py search "催化剂"
+python kb.py semantic-search "高镍正极循环衰减"
 python kb.py ask "催化剂 A 的推荐条件是什么"
 python kb.py propose
 python kb.py distill
@@ -104,8 +108,14 @@ python kb.py apply-proposal vault/proposals/PROP-xxx.md
 `search`
 : 只做本地检索, 不调用 AI。
 
+`embed-index`
+: 调用本地 embedding 服务或命令, 给索引 chunk 建语义向量。
+
+`semantic-search`
+: 使用本地 embedding 做语义检索。
+
 `ask`
-: 先检索, 再尝试调用公司内网的 OpenAI 兼容接口。
+: 先检索, 再调用公司内网的 OpenAI 兼容接口。没有 AI 时直接报错。
 
 `propose`
 : 生成 `vault/proposals/` 里的待审核草稿, 不会自动改正式知识库。
@@ -156,7 +166,7 @@ raw/literature/     PDF 文献
 raw/reports/        PDF、PPT、会议材料
 ```
 
-因为第一版零第三方依赖, PDF/PPT/Word/Excel 提取是保守能力。你可以先运行内置提取命令:
+PDF/PPT/Word/Excel 提取是 raw 到 extract 的第一关。你可以先运行内置提取命令:
 
 ```powershell
 python kb.py extract raw/literature/paper.pdf --kind literature --title "论文标题"
@@ -164,7 +174,7 @@ python kb.py extract raw/reports/weekly.pptx --kind report --title "小组周报
 python kb.py extract raw/experiments/run.xlsx --kind experiment --title "实验记录"
 ```
 
-`.docx/.pptx/.xlsx` 会通过 ZIP/XML 读取文本。PDF 是 best-effort 提取, 扫描版 PDF 需要外部 OCR。旧 `.doc/.ppt/.xls` 建议先转成现代 Office 格式。
+`.docx/.pptx/.xlsx` 会通过 ZIP/XML 读取文本。PDF 默认按 `pdfplumber -> pdfminer -> pypdf -> pdftotext` 尝试; 如果所有后端失败或文本过短, 命令会报错停止, 不会把乱码写入 extract。扫描版 PDF 需要 OCR、Docling、Marker 或公司允许的离线转换器。旧 `.doc/.ppt/.xls` 建议先转成现代 Office 格式。
 
 你也可以用公司允许的工具或本地 AI 把原始文件摘成文本, 放到 `raw/extracts/`。
 
@@ -211,11 +221,21 @@ python kb.py search "催化剂"
 python kb.py ask "催化剂实验结论是什么"
 ```
 
-没有配置本地 AI 时, `ask` 会自动降级为本地检索结果, 不会报错也不会联网。
+没有配置本地 AI 时, `ask` 会报错停止, 不会联网, 也不会降级成检索结果。
 
 ## 接本地 AI
 
-如果公司提供的是 OpenAI 兼容接口, 在 PowerShell 里设置:
+推荐写在项目根目录 `.env`:
+
+```env
+LOCAL_OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_OPENAI_API_KEY=
+LOCAL_OPENAI_CHAT_MODEL=local-model-name
+LOCAL_OPENAI_EMBEDDING_MODEL=local-embedding-model
+PDF_EXTRACTOR=auto
+```
+
+也可以在 PowerShell 里临时设置:
 
 ```powershell
 $env:LOCAL_OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
@@ -224,7 +244,40 @@ $env:LOCAL_OPENAI_CHAT_MODEL="local-model-name"
 python kb.py ask "催化剂 A 的推荐条件是什么"
 ```
 
-只要 base URL 可用, 这个项目就会尝试调用本地模型。
+问答、蒸馏、`propose` 和 `update-proposals` 中的内容生成都必须调用本地模型。
+
+## 语义检索
+
+关键词检索跑通后, 可以加 embedding:
+
+```powershell
+python tools/setup_embedding.py --backend flagembedding --model-path models\bge-m3
+python kb.py index
+python kb.py embed-index
+python kb.py semantic-search "电解液添加剂改善高温循环"
+```
+
+如果公司提供 OpenAI 兼容 `/embeddings`, 只需要设置 `LOCAL_OPENAI_EMBEDDING_MODEL`。如果你们用 Python 或 Node 本地模型, 设置 `LOCAL_EMBEDDING_CMD`, 命令从 stdin 读取:
+
+```json
+{"input": ["文本1", "文本2"]}
+```
+
+然后向 stdout 输出向量数组, 或 OpenAI 风格:
+
+```json
+{"data": [{"embedding": [0.1, 0.2]}]}
+```
+
+项目已经提供三种本地命令适配:
+
+```powershell
+python tools/embed_flagembedding_bgem3.py
+python tools/embed_sentence_transformers.py
+node tools/embed_transformersjs.mjs
+```
+
+允许装 Python 库时, 优先看 `docs/local_embedding_setup.md` 里的 FlagEmbedding/BGE-M3 路线。PDF 和 embedding 的离线工具选型可以看 `docs/offline_pdf_embedding_options.md`。
 
 ## proposal 是什么
 
@@ -233,7 +286,7 @@ python kb.py ask "催化剂 A 的推荐条件是什么"
 它的用途是:
 
 1. 提醒你哪些文档缺摘要、缺结论、缺标签
-2. 让本地 AI 或规则系统先写建议稿
+2. 让本地 AI 先写建议稿
 3. 人工确认后再把内容合并回正式 Markdown
 
 第一版不会自动改正式知识库, 这是故意的, 这样更适合有审计要求的环境。
@@ -329,16 +382,9 @@ review_status: structured-draft
 
 录入时尽量保留这些词后面的原始数值: 正极、负极、电解液、隔膜、N/P、面密度、压实、涂布、烘干、化成、电压窗口、倍率、温度、容量、库伦效率、循环保持率、阻抗、EIS、CV、GITT、膨胀、产气、SEI、CEI、析锂。
 
-如果有本地 AI, `distill` 会尽量把这些模板填满；没有 AI 时, 它会用规则和章节提取生成可读版本。无论哪种方式, raw 原始材料都不会直接进入 `vault/`。
+`distill` 必须调用本地 AI 填写这些模板。raw 原始材料不会直接进入 `vault/`。
 
-凡是发生回退, 命令行都会出现 `warning:`。常见情况包括: PDF best-effort 抽取、旧 Office printable-string 抽取、CSV 缺字段补 `待补充`、无 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索、无本地 AI 时使用规则蒸馏或规则 proposal。
-
-如果你先用无 AI 模式生成过一版, 后来接好了本地 AI, 可以运行:
-
-```powershell
-python kb.py distill --force
-python kb.py index
-```
+凡是发生保留的弱路径, 命令行都会出现 `warning:`。常见情况包括: 旧 Office printable-string 抽取、未知文件类型 printable-string 抽取、CSV 缺字段补 `待补充`、无 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索。问答、蒸馏和内容 proposal 没有规则回退; AI 不可用时直接报错。
 
 ## 一个推荐工作流
 
@@ -351,21 +397,23 @@ python kb.py index
 5. 如果是 CSV 或 JSON 实验导出, 可以用 `python kb.py ingest 你的文件.csv` 自动生成实验摘录
 6. `python kb.py distill`
 7. `python kb.py index`
-8. `python kb.py search "你关心的关键词"`
-9. `python kb.py ask "完整问题"`
-10. `python kb.py sync`
-11. `python kb.py update-proposals`
-12. 审核 `vault/proposals/`
-13. `python kb.py apply-proposal vault/proposals/PROP-xxx.md`
-14. `python kb.py links`
+8. `python kb.py embed-index`
+9. `python kb.py search "你关心的关键词"`
+10. `python kb.py semantic-search "语义问题"`
+11. `python kb.py ask "完整问题"`
+12. `python kb.py sync`
+13. `python kb.py update-proposals`
+14. 审核 `vault/proposals/`
+15. `python kb.py apply-proposal vault/proposals/PROP-xxx.md`
+16. `python kb.py links`
 
 ## 常见坑
 
 `search` 没结果
 : 先确认跑过 `python kb.py index`。如果你改过 Markdown, 也要重新建索引。
 
-`ask` 只返回检索结果
-: 说明没有配置 `LOCAL_OPENAI_BASE_URL`, 或者本地 AI 接口不可达。
+`ask` 报 AI required
+: 说明没有配置 `.env`、`LOCAL_OPENAI_BASE_URL`, 或者本地 AI 接口不可达。
 
 导入后看不到新内容
 : 大概率是你还没执行 `python kb.py distill` 和 `python kb.py index`。
@@ -375,4 +423,4 @@ Windows 路径问题
 
 ## 你真正要记住的一句话
 
-raw 是原始证据, vault 是结构化知识库, SQLite 是索引, AI 只负责辅助蒸馏和提案。
+raw 是原始证据, vault 是结构化知识库, SQLite 是索引, AI 是问答、蒸馏和内容提案的必需能力。

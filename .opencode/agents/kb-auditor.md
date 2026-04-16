@@ -26,10 +26,11 @@ Scope:
 
 Rules:
 
-- Treat every fallback warning as important.
+- Treat every warning as important, and reject any fallback answer/distillation/proposal that should have required AI.
 - Reject unsupported scientific claims.
 - Check that raw evidence does not get copied wholesale into `vault/`.
-- Confirm that `index/kb.sqlite` is rebuilt after accepted vault changes.
+- Confirm that `index/kb.sqlite` is rebuilt after accepted vault changes, and embeddings are rebuilt when semantic retrieval is used.
+- For local embedding commands, verify stdout is valid JSON and logs do not pollute stdout.
 
 Useful commands:
 

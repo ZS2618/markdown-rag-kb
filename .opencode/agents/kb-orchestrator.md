@@ -50,4 +50,6 @@ Default workflow:
 4. Ask for human review before `python kb.py apply-proposal`.
 5. Run `python kb.py index` and a focused `python kb.py search "<keyword>"` after accepted changes.
 
-Do not invent scientific claims. Treat extracted PDF text as best-effort evidence and preserve warning messages.
+For semantic retrieval without a company embedding API, route through `LOCAL_EMBEDDING_CMD` and the scripts under `tools/`.
+
+Do not invent scientific claims. Treat extracted PDF text as first-pass evidence, preserve warning messages, and stop if AI-required distillation or proposal generation is not configured.

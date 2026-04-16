@@ -1,5 +1,11 @@
 __pycache__/
 *.pyc
+.env
+.venv-embed/
+models/
+node_modules/
+package.json
+package-lock.json
 .DS_Store
 **/.DS_Store
 index/*.sqlite

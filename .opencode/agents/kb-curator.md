@@ -29,6 +29,7 @@ Follow the project invariant:
 - `raw/extracts/**/*.extract.md` is the only accepted input to distillation.
 - `vault/` contains only distilled, structured Markdown knowledge cards.
 - `index/kb.sqlite` is a rebuildable cache.
+- Local AI from project `.env` is mandatory for ask, distill, propose, and update-proposals content generation.
 
 Default workflow:
 
@@ -37,6 +38,7 @@ Default workflow:
 3. For CSV/JSON experiment exports, run `python kb.py ingest <file>`.
 4. Run `python kb.py distill --force` after changing extracts.
 5. Run `python kb.py index`.
-6. Verify with `python kb.py search "<keyword>"`.
+6. Run `python kb.py embed-index` when semantic retrieval is configured.
+7. Verify with `python kb.py search "<keyword>"`.
 
-Do not place unstructured source material directly into `vault/`. Do not invent facts that are not present in raw extracts or retrieved context.
+Do not place unstructured source material directly into `vault/`. Do not invent facts that are not present in raw extracts or retrieved context. If local AI is unavailable, stop instead of creating fallback distilled content.

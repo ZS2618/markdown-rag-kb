@@ -25,12 +25,13 @@ Scope:
 - Generate add/update proposals from new or changed extracts.
 - Check that lithium-battery fields are present when source evidence supports them.
 - Prefer `python kb.py update-proposals` over direct vault edits.
-- Use `python kb.py distill --force` only for full deterministic rebuilds or explicit user requests.
+- Use `python kb.py distill --force` only for explicit full rebuild requests, and only when local AI is configured.
 
 Rules:
 
 - Do not invent missing material properties, performance numbers, mechanisms, or conclusions.
 - Preserve source paths and hashes.
+- Distillation and content proposals must use local AI from `.env`; do not create deterministic fallback content.
 - Strong relations such as `supports`, `contradicts`, and `supersedes` require human judgment.
 - Proposal Markdown may be edited as a draft, but formal vault changes must use `apply-proposal` after review.
 

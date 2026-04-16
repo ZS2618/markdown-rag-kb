@@ -1,12 +1,14 @@
 # 离线 Markdown 知识库 + 本地 RAG MVP
 
-这是一个 Windows 优先、零第三方 Python 依赖的离线知识库原型。原始文件放在 `raw/`，只有经过蒸馏并结构化的 Markdown 才进入 `vault/`，SQLite FTS5 是可重建索引，本地 AI 只作为可选增强。
+这是一个 Windows 优先、离线优先的 Markdown 知识库原型。原始文件放在 `raw/`，只有经过 AI 蒸馏并结构化的 Markdown 才进入 `vault/`，SQLite FTS5 是可重建索引，semantic embedding 可作为本地增强索引。问答、蒸馏和内容 proposal 必须调用公司内网 AI；没有 AI 配置时会直接报错，不做规则回退。
 
 ## 快速开始
 
-在 PowerShell 中进入项目目录后运行：
+在 PowerShell 中进入项目目录后，先复制 `.env.example` 为 `.env`，填入公司内网 OpenAI 兼容接口：
 
 ```powershell
+copy .env.example .env
+notepad .env
 python kb.py demo
 ```
 
@@ -19,7 +21,9 @@ python kb.py init
 python kb.py extract raw/literature/example.pdf --kind literature --title "文献标题"
 python kb.py ingest data/sample_experiments.csv
 python kb.py index
+python kb.py embed-index
 python kb.py search "催化剂"
+python kb.py semantic-search "高镍正极循环衰减"
 python kb.py ask "催化剂 A 的推荐条件是什么"
 python kb.py propose
 python kb.py distill
@@ -29,10 +33,10 @@ python kb.py links
 python kb.py apply-proposal vault/proposals/PROP-xxx.md
 ```
 
-`ask` 会先做本地检索，再尝试调用公司内网 OpenAI 兼容接口。如果没有配置 AI，它会自动降级为检索结果，不会联网。
+`ask` 会先做本地检索，再调用公司内网 OpenAI 兼容接口生成带来源的回答。如果没有配置 AI，它会报错并停止，不会联网，也不会回退成纯检索答案。
 `extract` 会把 PDF、PPTX、DOCX、XLSX 或文本类原始文件转成 `raw/extracts/**/*.extract.md`。
-`distill` 会读取 `raw/extracts/` 里的文本摘录，把实验、文献和小组汇报压缩成可检索的结构化知识卡，并写入 `vault/`。
-如果你后来接入了本地 AI, 可以用 `python kb.py distill --force` 重新生成已有知识卡。
+`distill` 会读取 `raw/extracts/` 里的文本摘录，必须调用本地 AI 把实验、文献和小组汇报压缩成可检索的结构化知识卡，并写入 `vault/`。
+`embed-index` 会调用本地 embedding 服务或本地 embedding 命令，生成语义检索索引。
 
 `sync`、`update-proposals`、`links`、`apply-proposal` 是增量演化命令。它们不会让 AI 或规则直接改正式库, 而是先生成 `vault/proposals/` 草案, 人工确认后再应用。
 
@@ -65,7 +69,17 @@ opencode.json
 
 ## 本地 AI 配置
 
-如果公司提供的是 OpenAI 兼容接口，在 PowerShell 中设置：
+推荐把配置写在项目根目录 `.env`，`kb.py` 会自动加载这个文件，且 `.env` 已被 `.gitignore` 忽略：
+
+```env
+LOCAL_OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_OPENAI_API_KEY=
+LOCAL_OPENAI_CHAT_MODEL=local-chat-model
+LOCAL_OPENAI_EMBEDDING_MODEL=local-embedding-model
+PDF_EXTRACTOR=auto
+```
+
+如果公司更习惯 PowerShell 临时变量，也可以这样设置：
 
 ```powershell
 $env:LOCAL_OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
@@ -75,6 +89,34 @@ python kb.py ask "催化剂实验结论是什么"
 ```
 
 `LOCAL_OPENAI_API_KEY` 可以为空；有些内网模型不要求密钥。
+
+问答、蒸馏、`propose` 和 `update-proposals` 中的内容生成都要求 AI 可用。`sync`、`links`、`index`、`search` 仍是本地规则/索引命令。
+
+## 本地 Embedding
+
+FTS5 适合精确关键词，但对同义词、跨语言、术语变体不够强。可以增加本地 embedding 索引：
+
+```powershell
+python tools/setup_embedding.py --backend flagembedding --model-path models\bge-m3
+python kb.py index
+python kb.py embed-index
+python kb.py semantic-search "电解液添加剂改善高温循环"
+```
+
+两种接法：
+
+- OpenAI 兼容 `/embeddings`: 设置 `LOCAL_OPENAI_EMBEDDING_MODEL`，默认复用 `LOCAL_OPENAI_BASE_URL`。
+- 本地命令: 设置 `LOCAL_EMBEDDING_CMD`，命令从 stdin 读取 `{"input": ["文本1", "文本2"]}`，向 stdout 输出向量数组或 OpenAI 风格 `{"data":[{"embedding":[...]}]}`。项目已提供三种适配脚本:
+
+```powershell
+python tools/embed_flagembedding_bgem3.py
+python tools/embed_sentence_transformers.py
+node tools/embed_transformersjs.mjs
+```
+
+办公室如果能批准模型文件，优先考虑多语言/中英混合 embedding，例如 BGE-M3 或 bge-large-zh-v1.5。Python 路线常见是 `sentence-transformers`，Node 路线可用 Transformers.js；本项目通过 OpenAI 兼容服务或 `LOCAL_EMBEDDING_CMD` 接入，避免把主程序绑定到某个包。
+
+本地 embedding 的安装和 `.env` 配置见 `docs/local_embedding_setup.md`。PDF 和 embedding 的离线工具选型见 `docs/offline_pdf_embedding_options.md`。
 
 ## 数据导入
 
@@ -104,13 +146,19 @@ JSON 支持对象数组：
 
 ## 原始文件提取
 
-第一版坚持零第三方依赖, 所以提取能力是保守的:
+主程序仍用 Python 标准库实现 CLI 和索引，但 PDF 提取允许调用办公室已经安装或批准的本地工具。默认 `PDF_EXTRACTOR=auto` 会按顺序尝试:
+
+```text
+pdfplumber -> pdfminer -> pypdf -> pdftotext
+```
 
 - `.docx`: 读取 Word ZIP/XML 文本
 - `.pptx`: 读取 PowerPoint ZIP/XML 幻灯片文本
 - `.xlsx`: 读取 Excel ZIP/XML 单元格文本
-- `.pdf`: 尽力读取 PDF 文本流、ToUnicode 字体映射和 Flate 压缩流; 仍需人工复核自定义字体空格、页眉页脚、广告链接和扫描页
+- `.pdf`: 优先用 `pdfplumber`/`pdfminer`/`pypdf`/`pdftotext`；如需接 Docling、Marker 或公司 OCR，可以设置 `PDF_EXTRACTOR=command` 和 `PDF_EXTRACTOR_CMD`
 - `.doc`、`.ppt`、`.xls`: 只能做可打印字符串兜底; 推荐先转成现代 Office 格式
+
+如果所有 PDF 后端都失败或文本过短，命令会报错停止，不会把乱码强行写入 extract。扫描版 PDF 仍需要 OCR 或 Docling/Marker 这类更重的离线工具。
 
 示例:
 
@@ -183,7 +231,7 @@ python kb.py sync
 python kb.py update-proposals
 ```
 
-它会为新增或变更的 extract 生成 `vault/proposals/PROP-ADD-*.md` 或 `vault/proposals/PROP-UPDATE-*.md`。
+它会为新增或变更的 extract 生成 `vault/proposals/PROP-ADD-*.md` 或 `vault/proposals/PROP-UPDATE-*.md`。建议写入内容必须由本地 AI 生成；没有 AI 时命令会失败。
 
 proposal 里包含:
 
@@ -271,11 +319,10 @@ review_status: structured-draft
 
 蒸馏卡保留 raw 来源路径和摘录哈希, 便于追溯原文。
 
-所有回退路径都会输出 `warning:`。例如 PDF/旧 Office 弱抽取、未知文件类型、CSV 缺字段补 `待补充`、缺 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索、未配置本地 AI 时使用规则蒸馏或规则 proposal，都会在命令行明确提示。
+所有保留的弱路径都会输出 `warning:`，例如旧 Office/未知文件类型的 printable-string 提取、CSV 缺字段补 `待补充`、缺 ID 生成稳定哈希、FTS5 未命中后使用 LIKE 检索。问答、蒸馏和内容 proposal 没有规则回退；AI 不可用时直接报错。
 
 ## 设计边界
 
-- 不使用第三方 Python 包，不依赖 pip、make、bash 或外网。
-- 不引入 LangChain、FAISS、FastAPI、PyYAML 或前端框架。
+- 主程序不依赖 LangChain、FAISS、FastAPI、PyYAML 或前端框架；PDF/embedding 可通过公司批准的本地包、命令或服务外挂。
 - SQLite 索引是派生缓存，可以删除后用 `python kb.py index` 重建。
 - 第一版保留 `acl` 字段，但不做强制权限过滤。
