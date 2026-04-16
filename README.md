@@ -118,6 +118,63 @@ node tools/embed_transformersjs.mjs
 
 本地 embedding 的安装和 `.env` 配置见 `docs/local_embedding_setup.md`。PDF 和 embedding 的离线工具选型见 `docs/offline_pdf_embedding_options.md`。
 
+## 如何引导 Agent 配置
+
+在 OpenCode 里优先选择 `kb-orchestrator`, 并明确要求它使用 `local-config` skill。最稳的提示词是:
+
+```text
+请使用 local-config skill，先阅读 docs/agent_configuration_guide.md。
+目标：配置本项目在办公室电脑上的本地 AI 和本地 embedding。
+
+要求：
+1. 不联网，除非我明确允许。
+2. 不要提交 .env、models、.venv-embed、node_modules、raw、vault、index 文件。
+3. embedding 默认使用 FlagEmbedding + BGE-M3。
+4. 模型路径使用 models/bge-m3。
+5. 如果模型目录不存在，运行 setup_embedding.py 时加 --skip-smoke-test，只写好配置并告诉我需要拷贝模型。
+6. 如果 pip 安装失败，不要换公网源，告诉我需要内网 pip 镜像或离线 wheel 目录。
+7. 配置后运行可执行的验证：python kb.py --help、python tools/setup_embedding.py --help、python kb.py index。
+8. 如果 embedding 已可用，再运行 python kb.py embed-index 和 semantic-search。
+9. 最后用清单告诉我：已完成、未完成、阻塞点、下一步命令。
+```
+
+如果公司有内网 pip 镜像, 可以让 agent 使用:
+
+```text
+请使用 local-config skill，先阅读 docs/agent_configuration_guide.md。
+用 FlagEmbedding + BGE-M3 配置本地 embedding：
+python tools/setup_embedding.py --backend flagembedding --model-path models/bge-m3 --pip-index-url http://你的内网pypi/simple
+配置完成后运行 python kb.py index、python kb.py embed-index 和一次 semantic-search。
+不要提交 .env、models、raw、vault、node_modules 或 index 文件。
+```
+
+如果公司使用离线 wheel 包:
+
+```text
+请使用 local-config skill，按 docs/agent_configuration_guide.md 配置本地 embedding。
+后端使用 flagembedding，模型路径 models/bge-m3，Python 依赖从 D:\wheels 安装：
+--offline-wheel-dir D:\wheels
+如果模型或依赖缺失，停止并明确告诉我缺什么，不要尝试公网下载。
+```
+
+如果要走 Node + Transformers.js:
+
+```text
+请使用 local-config skill，按 docs/agent_configuration_guide.md 配置 Node + Transformers.js embedding。
+模型目录是 models/bge-small-zh-v1.5。
+运行 python tools/setup_embedding.py --backend node --model-path models/bge-small-zh-v1.5。
+配置后验证 embed-index 和 semantic-search。
+不要提交 .env、models、node_modules、package.json、package-lock.json、raw、vault 或 index 文件。
+```
+
+配置完成后可以让 agent 做一次审计:
+
+```text
+现在根据 docs/agent_configuration_guide.md 做一次配置审计。
+检查 .env 是否有 LOCAL_EMBEDDING_CMD，运行 index、embed-index、semantic-search。
+如果失败，只报告原因和修复命令，不要改 raw/vault。
+```
+
 ## 数据导入
 
 第一版支持 CSV 和 JSON。CSV 每一行会先生成一篇 `raw/extracts/experiments/*.extract.md`，它还不是正式知识库内容。系统优先识别这些字段：
