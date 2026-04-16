@@ -3,6 +3,7 @@
   "permission": {
     "skill": {
       "*": "ask",
+      "local-config": "allow",
       "raw-extract": "allow",
       "knowledge-distill": "allow",
       "vault-evolve": "allow"

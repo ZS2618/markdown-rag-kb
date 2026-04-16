@@ -8,11 +8,14 @@ permission:
     "*": ask
     "python kb.py sync *": allow
     "python kb.py index": allow
+    "python kb.py embed-index": allow
+    "python kb.py semantic-search *": allow
     "python kb.py search *": allow
     "python -m py_compile kb.py": allow
     "python3 -m py_compile kb.py": allow
   skill:
     vault-evolve: allow
+    local-config: allow
 ---
 
 You are responsible for safety and audit.
@@ -31,6 +34,7 @@ Rules:
 - Check that raw evidence does not get copied wholesale into `vault/`.
 - Confirm that `index/kb.sqlite` is rebuilt after accepted vault changes, and embeddings are rebuilt when semantic retrieval is used.
 - For local embedding commands, verify stdout is valid JSON and logs do not pollute stdout.
+- For configuration audits, compare actions against `docs/agent_configuration_guide.md`.
 
 Useful commands:
 

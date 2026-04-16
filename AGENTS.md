@@ -20,6 +20,8 @@ vault/                Structured knowledge cards only
 
 ## Preferred Workflow
 
+For office-machine setup, local AI, PDF extraction, or embedding configuration, read `docs/agent_configuration_guide.md` first and prefer `python tools/setup_embedding.py`.
+
 1. Put original files under `raw/experiments/`, `raw/literature/`, or `raw/reports/`.
 2. Run `python kb.py extract <raw-file> --kind <experiment|literature|report>`.
 3. Manually improve weak `.extract.md` files when extraction is incomplete.
@@ -66,6 +68,7 @@ Project skills:
 - `raw-extract`: convert raw files into `.extract.md`.
 - `knowledge-distill`: convert extracts into structured `vault/` cards.
 - `vault-evolve`: manage `sync`, `update-proposals`, `links`, and `apply-proposal`.
+- `local-config`: configure local AI, PDF extraction, and embedding backends.
 
 Coordinator pattern:
 

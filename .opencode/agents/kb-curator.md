@@ -11,6 +11,9 @@ permission:
     "python kb.py ingest *": allow
     "python kb.py distill *": allow
     "python kb.py index": allow
+    "python kb.py embed-index": allow
+    "python kb.py semantic-search *": allow
+    "python tools/setup_embedding.py *": allow
     "python kb.py search *": allow
     "python kb.py ask *": allow
     "python -m py_compile kb.py": allow
@@ -18,6 +21,7 @@ permission:
   skill:
     raw-extract: allow
     knowledge-distill: allow
+    local-config: allow
 ---
 
 You are the knowledge-base curator for this repository.
@@ -30,6 +34,7 @@ Follow the project invariant:
 - `vault/` contains only distilled, structured Markdown knowledge cards.
 - `index/kb.sqlite` is a rebuildable cache.
 - Local AI from project `.env` is mandatory for ask, distill, propose, and update-proposals content generation.
+- For configuration tasks, follow `docs/agent_configuration_guide.md`.
 
 Default workflow:
 

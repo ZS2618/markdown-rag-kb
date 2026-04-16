@@ -15,6 +15,9 @@ permission:
     "python kb.py apply-proposal *": ask
     "python kb.py distill *": allow
     "python kb.py index": allow
+    "python kb.py embed-index": allow
+    "python kb.py semantic-search *": allow
+    "python tools/setup_embedding.py *": allow
     "python kb.py search *": allow
     "python kb.py ask *": allow
     "python -m py_compile kb.py": allow
@@ -23,6 +26,7 @@ permission:
     raw-extract: allow
     knowledge-distill: allow
     vault-evolve: allow
+    local-config: allow
 ---
 
 You are the primary coordinator for this offline Markdown RAG knowledge base.
@@ -33,6 +37,7 @@ Architecture:
 - Use `kb-distiller` for structured card proposals and lithium-battery template quality.
 - Use `kb-linker` for new-old knowledge relationships.
 - Use `kb-auditor` for review, warnings, provenance, and final verification.
+- Use `local-config` for office-machine setup, local AI, PDF extraction, and embedding configuration.
 
 Core invariant:
 
@@ -51,5 +56,6 @@ Default workflow:
 5. Run `python kb.py index` and a focused `python kb.py search "<keyword>"` after accepted changes.
 
 For semantic retrieval without a company embedding API, route through `LOCAL_EMBEDDING_CMD` and the scripts under `tools/`.
+For configuration tasks, read `docs/agent_configuration_guide.md` first.
 
 Do not invent scientific claims. Treat extracted PDF text as first-pass evidence, preserve warning messages, and stop if AI-required distillation or proposal generation is not configured.

@@ -53,4 +53,4 @@ python kb.py index
 - Do not treat SQLite as source of truth.
 - Do not invent relations beyond the available source text.
 - Stop if `.env`/local AI is not configured for content proposals.
-- If no embedding API exists, use `LOCAL_EMBEDDING_CMD` with `tools/embed_flagembedding_bgem3.py`, `tools/embed_sentence_transformers.py`, or `tools/embed_transformersjs.mjs`.
+- If no embedding API exists, use `LOCAL_EMBEDDING_CMD` with `tools/embed_flagembedding_bgem3.py`, `tools/embed_sentence_transformers.py`, or `tools/embed_transformersjs.mjs`; follow `docs/agent_configuration_guide.md` for setup details.
